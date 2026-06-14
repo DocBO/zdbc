@@ -2,7 +2,7 @@
 
 ## Inspiration
 
-This project was inspired by https://github.com/Neon32eeee/DDB.zig but re-created from scratch with string analytics focus, table separation and Pyton bindings.
+This project was inspired by https://github.com/Neon32eeee/DDB.zig but re-created from scratch with strong columns-analytics focus, table separation and Pyton bindings.
 
 ## About
 
