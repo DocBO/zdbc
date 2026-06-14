@@ -271,6 +271,75 @@ pub fn saveColTable(io: Io, allocator: std.mem.Allocator, dir: Io.Dir, table_nam
     }
 }
 
+const ColumnWriteJob = struct {
+    err: ?anyerror = null,
+    data_ptr: [*]const u8 = undefined,
+    data_len: usize = 0,
+    name: []const u8 = "",
+};
+
+fn columnWriteFn(job: *ColumnWriteJob, io: Io, dir: Io.Dir, table_name: []const u8) void {
+    var file_name_buf: [256]u8 = undefined;
+    const file_name = std.fmt.bufPrint(&file_name_buf, "{s}.{s}", .{table_name, job.name}) catch {
+        job.err = error.NameTooLong;
+        return;
+    };
+    var file = dir.createFile(io, file_name, .{}) catch |err| {
+        job.err = err;
+        return;
+    };
+    defer file.close(io);
+    file.writeStreamingAll(io, job.data_ptr[0..job.data_len]) catch |err| {
+        job.err = err;
+    };
+}
+
+/// Writes all column files in parallel using one thread per column.
+/// Uses the same auto-detection heuristic as the read path (~100 KB per column threshold).
+pub fn writeColumnFilesParallel(io: Io, allocator: std.mem.Allocator, dir: Io.Dir, table_name: []const u8, columns: []const ColumnSchema, data: []const ColumnData) !void {
+    const n = columns.len;
+    if (n == 0) return;
+    if (n == 1) return writeColumnFile(io, allocator, dir, table_name, columns[0].name, data[0]);
+
+    const per_col_bytes = data[0].len() * 8;
+    if (per_col_bytes < 100_000) {
+        for (0..n) |i| {
+            try writeColumnFile(io, allocator, dir, table_name, columns[i].name, data[i]);
+        }
+        return;
+    }
+
+    var jobs = try allocator.alloc(ColumnWriteJob, n);
+    defer allocator.free(jobs);
+    var threads = try allocator.alloc(std.Thread, n);
+    defer allocator.free(threads);
+
+    for (0..n) |i| {
+        jobs[i] = .{
+            .data_ptr = @as([*]const u8, @ptrCast(data[i].ptr().?)),
+            .data_len = data[i].len() * columns[i].col_type.sizeOf(),
+            .name = columns[i].name,
+        };
+    }
+    for (0..n) |i| {
+        threads[i] = try std.Thread.spawn(.{}, columnWriteFn, .{ &jobs[i], io, dir, table_name });
+    }
+    var first_err: ?anyerror = null;
+    for (0..n) |i| {
+        threads[i].join();
+        if (jobs[i].err) |err| {
+            if (first_err == null) first_err = err;
+        }
+    }
+    if (first_err) |err| return err;
+}
+
+/// Like saveColTable but writes all column files in parallel.
+pub fn saveColTableParallel(io: Io, allocator: std.mem.Allocator, dir: Io.Dir, table_name: []const u8, table: *const ColTable.ColTable) !void {
+    try writeSchema(io, allocator, dir, table_name, &table.schema);
+    try writeColumnFilesParallel(io, allocator, dir, table_name, table.schema.columns, table.columns);
+}
+
 pub fn writeRawColumns(io: Io, allocator: std.mem.Allocator, dir: Io.Dir, table_name: []const u8, columns: []const ColumnSchema, num_rows: u64, data_ptrs: []const [*]const u8, data_lens: []const usize) !void {
     const schema = TableSchema{
         .name = table_name,

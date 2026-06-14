@@ -145,6 +145,20 @@ pub fn ZDBC() type {
 
             try ColumnIO.saveColTable(db.io, db.allocator, dir, name, table);
 
+            try db.updateRegistryEntry(name, &table.schema);
+        }
+
+        pub fn saveColTableParallel(db: *@This(), name: []const u8, table: *const ColTable.ColTable) !void {
+            try db.ensureDataDir();
+            var dir = try db.openDataDir();
+            defer dir.close(db.io);
+
+            try ColumnIO.saveColTableParallel(db.io, db.allocator, dir, name, table);
+
+            try db.updateRegistryEntry(name, &table.schema);
+        }
+
+        fn updateRegistryEntry(db: *@This(), name: []const u8, schema: *const TableSchema) !void {
             if (db.schemas.getEntry(name)) |kv| {
                 kv.value_ptr.deinit(db.allocator);
                 const old_key = kv.key_ptr.*;
@@ -152,8 +166,8 @@ pub fn ZDBC() type {
                 db.allocator.free(old_key);
             }
             const key_name = try db.allocator.dupe(u8, name);
-            var columns = try db.allocator.alloc(ColumnSchema, table.schema.columns.len);
-            for (table.schema.columns, 0..) |col, i| {
+            var columns = try db.allocator.alloc(ColumnSchema, schema.columns.len);
+            for (schema.columns, 0..) |col, i| {
                 columns[i] = .{
                     .name = try db.allocator.dupe(u8, col.name),
                     .col_type = col.col_type,
@@ -162,7 +176,7 @@ pub fn ZDBC() type {
             const schema_copy = TableSchema{
                 .name = try db.allocator.dupe(u8, name),
                 .columns = columns,
-                .num_rows = table.schema.num_rows,
+                .num_rows = schema.num_rows,
             };
             try db.schemas.put(key_name, schema_copy);
             try db.syncRegistry();
@@ -179,28 +193,7 @@ pub fn ZDBC() type {
                 .num_rows = num_rows,
             };
             try ColumnIO.writeSchema(db.io, db.allocator, dir, name, &schema);
-
-            if (db.schemas.getEntry(name)) |kv| {
-                kv.value_ptr.deinit(db.allocator);
-                const old_key = kv.key_ptr.*;
-                _ = db.schemas.remove(name);
-                db.allocator.free(old_key);
-            }
-            const key_name = try db.allocator.dupe(u8, name);
-            var owned_columns = try db.allocator.alloc(ColumnSchema, columns.len);
-            for (columns, 0..) |col, i| {
-                owned_columns[i] = .{
-                    .name = try db.allocator.dupe(u8, col.name),
-                    .col_type = col.col_type,
-                };
-            }
-            const schema_copy = TableSchema{
-                .name = try db.allocator.dupe(u8, name),
-                .columns = owned_columns,
-                .num_rows = num_rows,
-            };
-            try db.schemas.put(key_name, schema_copy);
-            try db.syncRegistry();
+            try db.updateRegistryEntry(name, &schema);
         }
 
         pub fn readColumn(db: *@This(), table_name: []const u8, col_name: []const u8) !ColumnData {

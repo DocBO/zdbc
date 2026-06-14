@@ -21,10 +21,11 @@ the old `std.fs` blocking-I/O API with explicit `Io` vtable dispatch, enabling:
   a single contiguous output buffer, eliminating per-column alloc+copy+free cycles.
 - **Lazy column init** — `ColTable.initLazy` skips pre-allocation of column arrays
   when loading from disk, avoiding 10 redundant mmap/munmap syscalls for 5-column tables.
-- **Parallel column reads** — `loadColTableParallel` and `readColumnFilesParallel`
+- **Parallel column reads & writes** — `loadColTableParallel` / `saveColTableParallel`
   spawn one thread per column file. An auto-detection heuristic checks `num_rows × 8`
   per column: below ~100 KB (~12,500 rows) the call falls back to sequential I/O since
-  thread spawn overhead would dominate.
+  thread spawn overhead would dominate. Write parallelism mainly benefits the warm path;
+  cold writes are bottlenecked by filesystem block allocation.
 - **Stack-allocated file names** — all `"{table}.{column}"` path construction uses
   `bufPrint` into a 256-byte stack buffer, eliminating per-call heap allocations.
 
@@ -266,10 +267,10 @@ on AMD Ryzen, Linux, NVMe SSD.
 
 | Metric | Time |
 |--------|------|
-| `write_table` | 8.81 ms |
-| `read_columns` (all cols) | 0.29 ms |
+| `write_table` | 9.61 ms |
+| `read_columns` (all cols) | 0.40 ms |
 | `read_column` (single) | 0.03 ms |
-| `load_table` (→DataFrame) | 1.67 ms |
+| `load_table` (→DataFrame) | 1.85 ms |
 
 Run benchmarks:
 ```bash
