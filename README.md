@@ -64,12 +64,11 @@ The padding format depends on which C ABI path was used:
 | `read_table()` batch | `zdbc_read_table` | null `0x00` (after `trimStr8Buffer`) | `S8` | `b'Alice\x00\x00\x00'` |
 | `read_columns()` default | calls `read_table` | null | `S8` | — |
 | `read_columns(col_names=…)` | calls `read_column` per col | space | `S8` | — |
-| `load_table()` → DataFrame | `read_columns` → `S8` → `.rstrip(b'\x00 ').decode()` | decoded to Python `str` | `object` | `'Alice'` |
+| `load_table()` → DataFrame | `read_columns` → `S8` | bytes columns (native S8) | `object` | `b'Alice\x00\x00\x00'` |
 
-Both paths produce valid numpy `S8` arrays. The `load_table()` convenience
-wrapper decodes each STR8 element via `rstrip(bytes)→decode()` on the Python
-side (handles both space-padded and null-padded data) before constructing the
-DataFrame.
+Both paths produce valid numpy `S8` arrays. `load_table()` returns them as-is
+(bytes columns in the DataFrame); call `.str.decode()` to convert to Python `str`
+on demand. The raw S8 format is ~3× faster than converting to str at load time.
 
 ### Data Flow
 
@@ -270,24 +269,24 @@ on AMD Ryzen, Linux, NVMe SSD.
 
 | Format | Disk | Write | Read (median of 5) | vs baseline |
 |--------|------|-------|---------------------|-------------|
-| **pyzdbc** | 390.7 KB | 8.81 ms | **0.29 ms** | **6.0× faster read vs Feather** |
-| Feather | 204.7 KB | 8.07 ms | 1.73 ms | — |
-| Parquet (uncompressed) | 171.1 KB | 7.47 ms | 2.67 ms | — |
-| Parquet (snappy) | 110.1 KB | 18.07 ms | 2.96 ms | — |
+| **pyzdbc** | 390.7 KB | 8.05 ms | **0.28 ms** | **7.2× faster read vs Feather** |
+| Feather | 204.7 KB | 9.00 ms | 2.01 ms | — |
+| Parquet (uncompressed) | 171.1 KB | 5.57 ms | 2.40 ms | — |
+| Parquet (snappy) | 110.1 KB | 17.98 ms | 2.89 ms | — |
 
-- **Reads**: pyzdbc is **6× faster** than Feather, **10× faster** than compressed Parquet.
+- **Reads**: pyzdbc is **7× faster** than Feather, **10× faster** than compressed Parquet.
 - **Writes**: pyzdbc is competitive with Feather, behind uncompressed Parquet (per-column file overhead).
-- **`load_table` (→DataFrame)**: **1.67 ms** — includes S8 string decode to Python str.
+- **`load_table` (→DataFrame)**: **1.69 ms** — STR8 columns returned as `bytes`; call `.str.decode()` to convert to str.
 - **Disk**: 40.0 B/row (fixed 8-byte strings); 2–3× larger than compressed formats — tradeoff for fixed-stride zero-copy access.
 
 ### Python Throughput (current)
 
 | Metric | Time |
 |--------|------|
-| `write_table` | 9.24 ms |
-| `read_columns` (all cols) | 0.34 ms |
+| `write_table` | 8.05 ms |
+| `read_columns` (all cols) | 0.28 ms |
 | `read_column` (single) | 0.03 ms |
-| `load_table` (→DataFrame) | 4.36 ms |
+| `load_table` (→DataFrame) | 1.69 ms |
 
 Run benchmarks:
 ```bash

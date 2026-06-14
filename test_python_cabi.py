@@ -23,6 +23,10 @@ DB_PATH = os.path.join(tempfile.gettempdir(), "zdbc_test_db")
 failed = 0
 passed = 0
 
+def _s8_to_str(val):
+    """Convert S8 bytes to Python str. (padding is removed in the interface)"""
+    return val.decode()
+
 def check(cond, msg):
     global passed, failed
     if cond:
@@ -55,6 +59,10 @@ db.create_table("integrity", {"id": "i64", "rand": "i64", "score": "f64",
 db.write_table("integrity", df)
 
 loaded = db.load_table("integrity")
+# convert bytes columns to str for comparison with original DataFrame
+for c in ["code"]:
+    if c in loaded.columns:
+        loaded[c] = loaded[c].apply(_s8_to_str)
 
 for col in df.columns:
     ok = df[col].equals(loaded[col])
@@ -83,9 +91,9 @@ check(np.array_equal(loaded["i"].values, df_edge["i"].values, equal_nan=False),
 check(np.isnan(loaded["f"].iloc[0]), "NaN not preserved")
 check(np.isinf(loaded["f"].iloc[1]) and loaded["f"].iloc[1] > 0, "+inf not preserved")
 check(np.isinf(loaded["f"].iloc[2]) and loaded["f"].iloc[2] < 0, "-inf not preserved")
-check(loaded["s"].iloc[0] == "", f"empty STR8 got '{loaded['s'].iloc[0]}'")
-check(loaded["s"].iloc[3] == "ABCDEFGH", "8-char STR8 mismatch")
-check(loaded["s"].iloc[4] == "12345678", "numeric STR8 mismatch")
+check(_s8_to_str(loaded["s"].iloc[0]) == "", f"empty STR8 got '{loaded['s'].iloc[0]}'")
+check(_s8_to_str(loaded["s"].iloc[3]) == "ABCDEFGH", "8-char STR8 mismatch")
+check(_s8_to_str(loaded["s"].iloc[4]) == "12345678", "numeric STR8 mismatch")
 
 # ────────────────────────────────────────────────────────
 section("3. Multiple tables, independence")
@@ -134,9 +142,9 @@ db.create_table("str_only", {"tag": "str"})
 db.write_table("str_only", df_str)
 loaded = db.load_table("str_only")
 
-check(loaded["tag"].iloc[0] == "AB", "2-char STR8 not trimmed")
-check(loaded["tag"].iloc[1] == "LONGNAME", "8-char STR8 truncated")
-check(loaded["tag"].iloc[2] == "", "empty STR8 not preserved")
+check(_s8_to_str(loaded["tag"].iloc[0]) == "AB", "2-char STR8 not trimmed")
+check(_s8_to_str(loaded["tag"].iloc[1]) == "LONGNAME", "8-char STR8 truncated")
+check(_s8_to_str(loaded["tag"].iloc[2]) == "", "empty STR8 not preserved")
 
 # ────────────────────────────────────────────────────────
 section("6. F64-only table + precision")

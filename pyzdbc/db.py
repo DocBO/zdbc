@@ -145,14 +145,8 @@ class DB:
 
     def load_table(self, name):
         columns = self.read_columns(name)
-        data = {}
-        for cname, arr in columns.items():
-            if arr.dtype.kind == 'S':
-                data[cname] = [v.rstrip(b'\x00 ').decode() for v in arr]
-            else:
-                data[cname] = arr
         import pandas as pd
-        return pd.DataFrame(data)
+        return pd.DataFrame(columns)
 
     def write_table(self, name, df):
         col_names = []
