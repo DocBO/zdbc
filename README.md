@@ -10,7 +10,23 @@ ZDBC is a **column-oriented embedded database** with a Zig core and Python bindi
 Each column is stored in its own binary file, enabling zero-copy reads, selective
 column retrieval, and direct numpy array access from Python.
 
-**Requirements:** Zig `0.15.1`, Linux / macOS. Python bindings require `numpy` and optionally `pandas`.
+**Requirements:** Zig `0.16.0`, Linux / macOS. Python bindings require `numpy` and optionally `pandas`.
+
+### Zig 0.16.0 & I/O Overhaul
+
+ZDBC has been ported to Zig 0.16.0's new `std.Io` subsystem. The migration replaces
+the old `std.fs` blocking-I/O API with explicit `Io` vtable dispatch, enabling:
+
+- **Batched multi-column reads** — `zdbc_read_table` reads all column data directly into
+  a single contiguous output buffer, eliminating per-column alloc+copy+free cycles.
+- **Lazy column init** — `ColTable.initLazy` skips pre-allocation of column arrays
+  when loading from disk, avoiding 10 redundant mmap/munmap syscalls for 5-column tables.
+- **Parallel column reads** — `loadColTableParallel` and `readColumnFilesParallel`
+  spawn one thread per column file. An auto-detection heuristic checks `num_rows × 8`
+  per column: below ~100 KB (~12,500 rows) the call falls back to sequential I/O since
+  thread spawn overhead would dominate.
+- **Stack-allocated file names** — all `"{table}.{column}"` path construction uses
+  `bufPrint` into a 256-byte stack buffer, eliminating per-call heap allocations.
 
 ## Architecture
 
@@ -223,11 +239,11 @@ on AMD Ryzen, Linux, NVMe SSD.
 
 | Phase | Time | Notes |
 |-------|------|-------|
-| Generate (in RAM) | 0.75 ms | 75 ns/row |
-| Save (5 column files) | 0.98 ms | 40.0 B/row on disk |
+| Generate (in RAM) | 0.82 ms | 82 ns/row |
+| Save (5 column files) | 7.86 ms | 40.0 B/row on disk |
 | Read 1 column | 0.10 ms | single 80 KB file |
-| Read 2 columns | 0.22 ms | 160 KB total |
-| Load full table | 0.48 ms | all 5 columns, 400 KB |
+| Read 2 columns | 0.16 ms | 160 KB total |
+| Load full table | 0.33 ms | all 5 columns, 400 KB |
 | Aggregate 3 columns | 0.03 ms | sum id+score+active |
 
 **Disk layout:** 400 KB total (registry 13 B + schema 62 B + 5×80 KB column files).
@@ -236,24 +252,24 @@ on AMD Ryzen, Linux, NVMe SSD.
 
 | Format | Disk | Write | Read (median of 5) | vs baseline |
 |--------|------|-------|---------------------|-------------|
-| **pyzdbc** | 390.7 KB | 8.6 ms | **0.33 ms** | **5.8× faster read vs Feather** |
-| Feather | 204.7 KB | 8.7 ms | 1.9 ms | — |
-| Parquet (uncompressed) | 171.1 KB | 7.1 ms | 2.6 ms | — |
-| Parquet (snappy) | 110.1 KB | 21.0 ms | 3.5 ms | — |
+| **pyzdbc** | 390.7 KB | 8.81 ms | **0.29 ms** | **6.0× faster read vs Feather** |
+| Feather | 204.7 KB | 8.07 ms | 1.73 ms | — |
+| Parquet (uncompressed) | 171.1 KB | 7.47 ms | 2.67 ms | — |
+| Parquet (snappy) | 110.1 KB | 18.07 ms | 2.96 ms | — |
 
 - **Reads**: pyzdbc is **6× faster** than Feather, **10× faster** than compressed Parquet.
-- **Writes**: pyzdbc is competitive with Feather, slightly behind uncompressed Parquet (per-column file overhead).
-- **`load_table` (→DataFrame)**: **1.77 ms** — faster than Feather's raw read (1.92 ms).
+- **Writes**: pyzdbc is competitive with Feather, behind uncompressed Parquet (per-column file overhead).
+- **`load_table` (→DataFrame)**: **1.67 ms** — includes S8 string decode to Python str.
 - **Disk**: 40.0 B/row (fixed 8-byte strings); 2–3× larger than compressed formats — tradeoff for fixed-stride zero-copy access.
 
-### Before/After Optimization
+### Python Throughput (current)
 
-| Python Metric | Before | After | Improvement |
-|---------------|--------|-------|-------------|
-| `read_columns` (all cols) | 0.40 ms | **0.33 ms** | 1.2× faster |
-| `read_column` (single) | 0.05 ms | 0.03 ms | 1.5× faster |
-| `load_table` (→DataFrame) | 7.74 ms | **1.77 ms** | **4.4× faster** |
-| `write_table` | 10.17 ms | **8.58 ms** | 1.2× faster |
+| Metric | Time |
+|--------|------|
+| `write_table` | 8.81 ms |
+| `read_columns` (all cols) | 0.29 ms |
+| `read_column` (single) | 0.03 ms |
+| `load_table` (→DataFrame) | 1.67 ms |
 
 Run benchmarks:
 ```bash

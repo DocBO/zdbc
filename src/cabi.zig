@@ -2,6 +2,7 @@ const std = @import("std");
 const ZDBC = @import("root.zig").ZDBC();
 const ColTable = @import("ColTable.zig");
 const ColumnIO = @import("ColumnIO.zig");
+const Io = std.Io;
 
 const ColType = ColTable.ColType;
 const ColumnSchema = ColTable.ColumnSchema;
@@ -13,17 +14,22 @@ fn newArena() std.heap.ArenaAllocator {
 }
 
 fn trimStr8Buffer(data: [*]u8, count: usize) void {
-    const stride = STR8_LEN;
-    var i: usize = 0;
-    while (i < count) : (i += 1) {
-        const off = i * stride;
-        var k: usize = stride;
-        while (k > 0) : (k -= 1) {
-            if (data[off + k - 1] != ' ') break;
+    const rows: [*][STR8_LEN]u8 = @ptrCast(@alignCast(data));
+    const space_word: u64 = 0x2020202020202020;
+    for (0..count) |i| {
+        const s = &rows[i];
+        const word: u64 = @bitCast(s.*);
+        const xored = word ^ space_word;
+        if (xored == 0) {
+            s.* = [_]u8{0} ** STR8_LEN;
+            continue;
         }
-        if (k < stride) {
-            @memset(data[off + k .. off + stride], 0);
-        }
+        // @clz gives leading zero bits. Eight per byte, from the MSB (byte 7 in LE).
+        const trailing_space_bytes = @clz(xored) / 8;
+        const keep_bytes: u6 = @intCast(STR8_LEN - trailing_space_bytes);
+        // mask keeps the lower keep_bytes*8 bits, zeros the upper bits
+        const mask: u64 = if (keep_bytes == 8) ~@as(u64, 0) else (@as(u64, 1) << @as(u6, @intCast(keep_bytes * 8))) - 1;
+        s.* = @bitCast(word & mask);
     }
 }
 
@@ -139,16 +145,15 @@ export fn zdbc_read_column(db: *ZDBC, table_name: [*:0]const u8, col_name: [*:0]
     out_data.* = @constCast(col_data.ptr().?);
     out_count.* = @intCast(col_data.len());
     out_type.* = @intFromEnum(ct);
-
-    if (ct == .STR8) {
-        trimStr8Buffer(@ptrCast(out_data.*.?), @intCast(col_data.len()));
-    }
+    // STR8 returned as raw S8 bytes — Python handles null/padding decode natively
     return 0;
 }
 
 export fn zdbc_free_column(db: *ZDBC, data: ?*anyopaque) void {
+    _ = db;
     if (data) |ptr| {
-        db.allocator.free(@as([*]u8, @ptrCast(ptr))[0..0]);
+        const slice: []u8 = @as([*]u8, @ptrCast(ptr))[0..0];
+        std.heap.c_allocator.free(slice);
     }
 }
 
@@ -188,21 +193,23 @@ export fn zdbc_read_table(db: *ZDBC, table_name: [*:0]const u8, out_data: *?*any
     const num_cols = schema.columns.len;
     const header_size = batchTableHeaderSize(num_cols);
 
-    var col_datas: [32]ColTable.ColumnData = undefined;
+    // Open the data dir once — not per column
+    db.ensureDataDir() catch |err| return mapError(err);
+    var dir = db.openDataDir() catch |err| return mapError(err);
+    defer dir.close(db.io);
+
+    // Phase 1: measure total data size
     var data_total: usize = 0;
-
-    for (schema.columns, 0..) |col, i| {
-        col_datas[i] = db.readColumn(name_slice, col.name) catch |err| return mapError(err);
-        data_total += col_datas[i].byteSize(col.col_type);
+    for (schema.columns) |col| {
+        data_total += col.col_type.sizeOf() * @as(usize, @intCast(schema.num_rows));
     }
-    defer for (col_datas[0..num_cols]) |*cd| {
-        cd.deinit(db.allocator);
-    };
 
+    // Phase 2: allocate the output buffer up front
     const total = header_size + data_total;
     const buf = db.allocator.alloc(u8, total) catch return -6;
     errdefer db.allocator.free(buf);
 
+    // Write header
     {
         const hdr_slice = buf[0..@sizeOf(BatchTableHeader)];
         var hdr: *BatchTableHeader = @ptrCast(@alignCast(hdr_slice.ptr));
@@ -210,15 +217,21 @@ export fn zdbc_read_table(db: *ZDBC, table_name: [*:0]const u8, out_data: *?*any
         hdr.num_columns = @intCast(num_cols);
     }
 
+    // Phase 3: read each column directly into the output buffer
     const meta_off = @sizeOf(BatchTableHeader);
     const meta_slice = buf[meta_off..header_size];
     var metas: [*]BatchColumnMeta = @ptrCast(@alignCast(meta_slice.ptr));
 
     var cur_offs: usize = header_size;
     for (schema.columns, 0..) |col, i| {
-        const cd = col_datas[i];
-        const byte_len = cd.byteSize(col.col_type);
-        const src = @as([*]const u8, @ptrCast(cd.ptr().?))[0..byte_len];
+        const byte_len = col.col_type.sizeOf() * @as(usize, @intCast(schema.num_rows));
+
+        // Read column data straight into the output buffer
+        const col_data_slice = buf[cur_offs..][0..byte_len];
+        ColumnIO.readColumnFileIntoBuf(
+            db.io, db.allocator, dir, name_slice, col.name, col.col_type,
+            @intCast(schema.num_rows), col_data_slice,
+        ) catch |err| return mapError(err);
 
         var meta = &metas[i];
         @memset(meta.name[0..], 0);
@@ -228,11 +241,10 @@ export fn zdbc_read_table(db: *ZDBC, table_name: [*:0]const u8, out_data: *?*any
         meta.count = @intCast(schema.num_rows);
         meta.byte_len = @intCast(byte_len);
         meta.data_offset = @intCast(cur_offs);
-        @memcpy(buf[cur_offs..][0..byte_len], src);
         cur_offs += byte_len;
     }
 
-    // Trim STR8 columns in-place: replace trailing spaces with nulls
+    // Trim STR8 columns in-place
     for (schema.columns, 0..) |col, i| {
         if (col.col_type == .STR8) {
             const meta = &metas[i];
@@ -276,7 +288,7 @@ export fn zdbc_write_table(db: *ZDBC, name: [*:0]const u8, col_names: [*]const [
     // Write column files directly from Python data pointers
     db.ensureDataDir() catch |err| return mapError(err);
     var dir = db.openDataDir() catch |err| return mapError(err);
-    defer dir.close();
+    defer dir.close(db.io);
 
     for (0..n) |i| {
         const ptr = column_data[i] orelse return -4;
@@ -284,9 +296,9 @@ export fn zdbc_write_table(db: *ZDBC, name: [*:0]const u8, col_names: [*]const [
         const byte_len = rows * ct.sizeOf();
 
         const file_name = std.mem.concat(aa, u8, &.{ name_slice, ".", schemas[i].name }) catch return -6;
-        var file = dir.createFile(file_name, .{}) catch |err| return mapError(err);
-        defer file.close();
-        file.writeAll(@as([*]const u8, @ptrCast(ptr))[0..byte_len]) catch return -6;
+        var file = dir.createFile(db.io, file_name, .{}) catch |err| return mapError(err);
+        defer file.close(db.io);
+        file.writeStreamingAll(db.io, @as([*]const u8, @ptrCast(ptr))[0..byte_len]) catch return -6;
     }
 
     // Write schema file and update registry

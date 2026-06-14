@@ -117,6 +117,28 @@ pub const ColTable = struct {
         };
     }
 
+    /// Creates a ColTable without allocating column data buffers.
+    /// Each column is initialized to an empty slice of the correct type.
+    /// Used when columns will be filled by reading from files.
+    pub fn initLazy(schema: TableSchema, allocator: std.mem.Allocator) !ColTable {
+        const columns = try allocator.alloc(ColumnData, schema.columns.len);
+        errdefer allocator.free(columns);
+
+        for (schema.columns, 0..) |col_schema, i| {
+            columns[i] = switch (col_schema.col_type) {
+                .I64 => .{ .I64 = &.{} },
+                .F64 => .{ .F64 = &.{} },
+                .STR8 => .{ .STR8 = &.{} },
+            };
+        }
+
+        return ColTable{
+            .schema = schema,
+            .columns = columns,
+            .allocator = allocator,
+        };
+    }
+
     pub fn deinit(self: *ColTable) void {
         for (self.columns) |*col| {
             col.deinit(self.allocator);
@@ -159,7 +181,7 @@ pub const ColTable = struct {
     pub fn getStr8(self: *const ColTable, col_name: []const u8, row: usize) ![]const u8 {
         const idx = self.schema.columnIndex(col_name) orelse return error.ColumnNotFound;
         if (self.columns[idx] != .STR8) return error.TypeMismatch;
-        return std.mem.trimRight(u8, &self.columns[idx].STR8[row], " ");
+        return std.mem.trimEnd(u8, &self.columns[idx].STR8[row], " ");
     }
 
     pub fn rowCount(self: *const ColTable) u64 {

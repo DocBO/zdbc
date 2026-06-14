@@ -1,6 +1,7 @@
 const std = @import("std");
 const ColTable = @import("ColTable.zig");
 const ColumnIO = @import("ColumnIO.zig");
+const Io = std.Io;
 
 pub const Table = ColTable.ColTable;
 pub const ColType = ColTable.ColType;
@@ -9,18 +10,24 @@ pub const ColumnSchema = ColTable.ColumnSchema;
 pub const TableSchema = ColTable.TableSchema;
 pub const STR8_LEN = ColTable.STR8_LEN;
 
+var global_io_threaded: Io.Threaded = .init_single_threaded;
+pub const global_io: Io = global_io_threaded.io();
+
 pub fn ZDBC() type {
     return struct {
         path: []const u8,
         allocator: std.mem.Allocator,
         schemas: std.StringHashMap(TableSchema),
         metadata_buffer: ?[]u8 = null,
+        io: Io,
+        data_dir_ensured: bool = false,
 
         pub fn init(name_file: []const u8, allocator: std.mem.Allocator) !@This() {
             var db = @This(){
                 .path = name_file,
                 .allocator = allocator,
                 .schemas = std.StringHashMap(TableSchema).init(allocator),
+                .io = global_io,
             };
             db.loadRegistry() catch |err| {
                 if (err != error.FileNotFound) return err;
@@ -39,19 +46,21 @@ pub fn ZDBC() type {
             if (db.metadata_buffer) |b| db.allocator.free(b);
         }
 
-        pub fn ensureDataDir(db: *const @This()) !void {
-            const dirname = try std.mem.concat(db.allocator, u8, &.{ db.path, "dir/" });
-            defer db.allocator.free(dirname);
-            _ = std.fs.cwd().makeOpenPath(dirname, .{}) catch |err| {
+        pub fn ensureDataDir(db: *@This()) !void {
+            if (db.data_dir_ensured) return;
+            var dirname_buf: [256]u8 = undefined;
+            const dirname = try std.fmt.bufPrint(&dirname_buf, "{s}dir/", .{db.path});
+            Io.Dir.cwd().createDirPath(db.io, dirname) catch |err| {
                 std.log.err("Failed to create data dir: {s}", .{@errorName(err)});
                 return err;
             };
+            db.data_dir_ensured = true;
         }
 
-        pub fn openDataDir(db: *const @This()) !std.fs.Dir {
-            const dirname = try std.mem.concat(db.allocator, u8, &.{ db.path, "dir/" });
-            defer db.allocator.free(dirname);
-            return std.fs.cwd().openDir(dirname, .{});
+        pub fn openDataDir(db: *const @This()) !Io.Dir {
+            var dirname_buf: [256]u8 = undefined;
+            const dirname = try std.fmt.bufPrint(&dirname_buf, "{s}dir/", .{db.path});
+            return Io.Dir.cwd().openDir(db.io, dirname, .{});
         }
 
         pub fn createTable(db: *@This(), name: []const u8, columns: []const ColumnSchema) !void {
@@ -88,9 +97,9 @@ pub fn ZDBC() type {
 
             try db.ensureDataDir();
             var dir = try db.openDataDir();
-            defer dir.close();
+            defer dir.close(db.io);
 
-            ColumnIO.deleteColTable(db.allocator, dir, name, kv.value_ptr) catch |err| {
+            ColumnIO.deleteColTable(db.io, db.allocator, dir, name, kv.value_ptr) catch |err| {
                 if (err != error.FileNotFound) return err;
             };
 
@@ -113,7 +122,7 @@ pub fn ZDBC() type {
         }
 
         pub fn listTables(db: *const @This()) ![][]const u8 {
-            var names = std.ArrayList([]const u8){};
+            var names = std.ArrayList([]const u8).empty;
             defer names.deinit(db.allocator);
             var it = db.schemas.iterator();
             while (it.next()) |e| {
@@ -122,19 +131,19 @@ pub fn ZDBC() type {
             return names.toOwnedSlice(db.allocator);
         }
 
-        pub fn loadColTable(db: *const @This(), name: []const u8) !ColTable.ColTable {
+        pub fn loadColTable(db: *@This(), name: []const u8) !ColTable.ColTable {
             try db.ensureDataDir();
             var dir = try db.openDataDir();
-            defer dir.close();
-            return ColumnIO.loadColTable(db.allocator, dir, name);
+            defer dir.close(db.io);
+            return ColumnIO.loadColTable(db.io, db.allocator, dir, name);
         }
 
         pub fn saveColTable(db: *@This(), name: []const u8, table: *const ColTable.ColTable) !void {
             try db.ensureDataDir();
             var dir = try db.openDataDir();
-            defer dir.close();
+            defer dir.close(db.io);
 
-            try ColumnIO.saveColTable(db.allocator, dir, name, table);
+            try ColumnIO.saveColTable(db.io, db.allocator, dir, name, table);
 
             if (db.schemas.getEntry(name)) |kv| {
                 kv.value_ptr.deinit(db.allocator);
@@ -162,14 +171,14 @@ pub fn ZDBC() type {
         pub fn saveTableSchema(db: *@This(), name: []const u8, columns: []const ColumnSchema, num_rows: u64) !void {
             try db.ensureDataDir();
             var dir = try db.openDataDir();
-            defer dir.close();
+            defer dir.close(db.io);
 
             const schema = TableSchema{
                 .name = name,
                 .columns = @constCast(columns),
                 .num_rows = num_rows,
             };
-            try ColumnIO.writeSchema(db.allocator, dir, name, &schema);
+            try ColumnIO.writeSchema(db.io, db.allocator, dir, name, &schema);
 
             if (db.schemas.getEntry(name)) |kv| {
                 kv.value_ptr.deinit(db.allocator);
@@ -194,22 +203,22 @@ pub fn ZDBC() type {
             try db.syncRegistry();
         }
 
-        pub fn readColumn(db: *const @This(), table_name: []const u8, col_name: []const u8) !ColumnData {
+        pub fn readColumn(db: *@This(), table_name: []const u8, col_name: []const u8) !ColumnData {
             const schema = db.schemas.get(table_name) orelse return error.TableNotFound;
             const col_type = schema.columnType(col_name) orelse return error.ColumnNotFound;
 
             try db.ensureDataDir();
             var dir = try db.openDataDir();
-            defer dir.close();
+            defer dir.close(db.io);
 
-            return ColumnIO.readColumnFile(db.allocator, dir, table_name, col_name, col_type, schema.num_rows);
+            return ColumnIO.readColumnFile(db.io, db.allocator, dir, table_name, col_name, col_type, schema.num_rows);
         }
 
-        pub fn readColumns(db: *const @This(), table_name: []const u8, col_names: []const []const u8) ![]ColumnData {
+        pub fn readColumns(db: *@This(), table_name: []const u8, col_names: []const []const u8) ![]ColumnData {
             const schema = db.schemas.get(table_name) orelse return error.TableNotFound;
             try db.ensureDataDir();
             var dir = try db.openDataDir();
-            defer dir.close();
+            defer dir.close(db.io);
 
             const result = try db.allocator.alloc(ColumnData, col_names.len);
             errdefer {
@@ -219,7 +228,7 @@ pub fn ZDBC() type {
 
             for (col_names, 0..) |col_name, i| {
                 const col_type = schema.columnType(col_name) orelse return error.ColumnNotFound;
-                result[i] = ColumnIO.readColumnFile(db.allocator, dir, table_name, col_name, col_type, schema.num_rows) catch |err| {
+                result[i] = ColumnIO.readColumnFile(db.io, db.allocator, dir, table_name, col_name, col_type, schema.num_rows) catch |err| {
                     for (result[0..i]) |*cd| cd.deinit(db.allocator);
                     db.allocator.free(result);
                     return err;
@@ -246,49 +255,58 @@ pub fn ZDBC() type {
         }
 
         pub fn syncRegistry(db: *const @This()) !void {
-            const ftmpname = try std.mem.concat(db.allocator, u8, &.{ db.path, ".tmp" });
-            defer db.allocator.free(ftmpname);
-            var file = try std.fs.cwd().createFile(ftmpname, .{});
-            defer file.close();
-            const buff = try db.allocator.alloc(u8, 4096);
-            defer db.allocator.free(buff);
-            var writer = file.writer(buff);
-            var w = &writer.interface;
-            try w.writeInt(u32, @intCast(db.schemas.count()), .little);
+            var ftmpname_buf: [256]u8 = undefined;
+            const ftmpname = try std.fmt.bufPrint(&ftmpname_buf, "{s}.tmp", .{db.path});
+            var file = try Io.Dir.cwd().createFile(db.io, ftmpname, .{});
+            defer file.close(db.io);
+
+            // Serialize table count + names into a buffer
+            var buf: [4096]u8 = undefined;
+            var pos: usize = 0;
+            std.mem.writeInt(u32, buf[pos..][0..4], @intCast(db.schemas.count()), .little);
+            pos += 4;
             var it = db.schemas.iterator();
             while (it.next()) |e| {
                 const k = e.key_ptr.*;
-                try w.writeInt(u32, @intCast(k.len), .little);
-                try w.writeAll(k);
+                std.mem.writeInt(u32, buf[pos..][0..4], @intCast(k.len), .little);
+                pos += 4;
+                @memcpy(buf[pos..][0..k.len], k);
+                pos += k.len;
             }
-            try w.flush();
-            try std.fs.cwd().rename(ftmpname, db.path);
+            try file.writeStreamingAll(db.io, buf[0..pos]);
+
+            const cwd = Io.Dir.cwd();
+            try Io.Dir.rename(cwd, ftmpname, cwd, db.path, db.io);
         }
 
         fn loadRegistry(db: *@This()) !void {
-            var file = std.fs.cwd().openFile(db.path, .{}) catch |err| {
+            var file = Io.Dir.cwd().openFile(db.io, db.path, .{}) catch |err| {
                 if (err == error.FileNotFound) return;
                 return err;
             };
-            defer file.close();
-            const stat = try file.stat();
+            defer file.close(db.io);
+            const stat = try file.stat(db.io);
             const size = stat.size;
             const buff = try db.allocator.alloc(u8, @intCast(size));
             db.metadata_buffer = buff;
-            var reader = file.reader(buff);
-            var r = &reader.interface;
-            const table_count = try r.takeInt(u32, .little);
+            _ = try file.readPositionalAll(db.io, buff, 0);
+
+            var pos: usize = 0;
+            const table_count = std.mem.readInt(u32, buff[pos..][0..4], .little);
+            pos += 4;
             for (0..table_count) |_| {
-                const kl = try r.takeInt(u32, .little);
-                const k = try r.take(@intCast(kl));
+                const kl = std.mem.readInt(u32, buff[pos..][0..4], .little);
+                pos += 4;
+                const k = buff[pos..][0..kl];
+                pos += kl;
                 const name = try db.allocator.dupe(u8, k);
                 errdefer db.allocator.free(name);
 
                 try db.ensureDataDir();
                 var dir = try db.openDataDir();
-                defer dir.close();
+                defer dir.close(db.io);
 
-                const schema = ColumnIO.readSchema(db.allocator, dir, name) catch |err| {
+                const schema = ColumnIO.readSchema(db.io, db.allocator, dir, name) catch |err| {
                     db.allocator.free(name);
                     if (err == error.TableNotFound) continue;
                     return err;
@@ -415,7 +433,7 @@ test "Read single column from disk" {
     try std.testing.expect(name_col == .STR8);
     try std.testing.expectEqual(@as(usize, 2), name_col.len());
 
-    const trimmed = std.mem.trimRight(u8, &name_col.STR8[0], " ");
+    const trimmed = std.mem.trimEnd(u8, &name_col.STR8[0], " ");
     try std.testing.expectEqualStrings("Foo", trimmed);
 
     var id_col = try db.readColumn("items", "id");

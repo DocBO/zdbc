@@ -31,7 +31,7 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    shared_lib.linkLibC();
+    shared_lib.root_module.link_libc = true;
 
     const shared_step = b.step("shared", "Build shared library for Python");
     shared_step.dependOn(&shared_lib.step);
