@@ -79,7 +79,7 @@ section("2. Edge values: min/max/NaN/empty STR8")
 df_edge = pd.DataFrame({
     "i": np.array([np.iinfo(np.int64).min, -1, 0, 1, np.iinfo(np.int64).max], dtype=np.int64),
     "f": np.array([np.nan, np.inf, -np.inf, 0.0, -0.0], dtype=np.float64),
-    "s": ["", "A", "AB", "ABCDEFGH", "12345678"],
+    "s": ["", "A", "AB", "ABCDEFGH", "1234567890"], # longer strings are cut automatically
 })
 db.create_table("edges", {"i": "i64", "f": "f64", "s": "str"})
 db.write_table("edges", df_edge)
