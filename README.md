@@ -1,5 +1,9 @@
 # ZDBC
 
+## Inspiration
+
+This project was inspired by https://github.com/Neon32eeee/DDB.zig but re-created from scratch with string analytics focus, table separation and Pyton bindings.
+
 ## About
 
 ZDBC is a **column-oriented embedded database** with a Zig core and Python bindings.
