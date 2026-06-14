@@ -14,7 +14,7 @@ column retrieval, and direct numpy array access from Python.
 
 ### Main Use Cases
 
-- all kind of analytics with only 3 data types (i64, f64 and str8: only 8 chars, trimmed down automatically)
+- all kind of analytics with only 3 data types (i64, f64 and str: only 8 chars, trimmed down automatically)
 - optimal for scientific data series of medium size, where reading speed matters.
 - easy python integration
 - super fast read/write of columns (huge improvement over Feather and Parquet in columns read mode)
