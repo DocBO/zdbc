@@ -1,0 +1,12 @@
+.zig-*
+zig-*
+pyzdbc/__pycache__
+
+# runtime database files (created by tests, benchmarks, and examples)
+*dir/
+DB*
+COL_BENCH*
+SMOKE*
+load.db
+save.db
+test_element
