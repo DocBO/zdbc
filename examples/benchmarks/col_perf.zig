@@ -60,7 +60,7 @@ pub fn main() !void {
     std.debug.print("GENERATE  {d:>6} rows: {d:>8.3} ms  ({d:>7.1} ns/row)\n", .{ num_rows, @as(f64, @floatFromInt(gen_ns)) / 1_000_000, @as(f64, @floatFromInt(gen_ns)) / @as(f64, @floatFromInt(num_rows)) });
 
     // ── Phase 2: Create DB and write to disk ─────────────────────────
-    var db = try zdbc.DB().init("COL_BENCH", allocator);
+    var db = try zdbc.ZDBC().init("COL_BENCH", allocator);
     defer db.deinit();
     try db.createTable(table_name, &col_defs);
 
