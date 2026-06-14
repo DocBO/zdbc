@@ -147,7 +147,10 @@ class DB:
         columns = self.read_columns(name)
         data = {}
         for cname, arr in columns.items():
-            data[cname] = arr
+            if arr.dtype.kind == 'S':
+                data[cname] = [v.rstrip(b'\x00 ').decode() for v in arr]
+            else:
+                data[cname] = arr
         import pandas as pd
         return pd.DataFrame(data)
 

@@ -126,7 +126,8 @@ pub fn ZDBC() type {
             defer names.deinit(db.allocator);
             var it = db.schemas.iterator();
             while (it.next()) |e| {
-                try names.append(db.allocator, e.key_ptr.*);
+                const copy = try db.allocator.dupe(u8, e.key_ptr.*);
+                try names.append(db.allocator, copy);
             }
             return names.toOwnedSlice(db.allocator);
         }
@@ -447,7 +448,213 @@ test "List Tables" {
     try db.createTable("t2", &columns);
 
     const names = try db.listTables();
-    defer db.allocator.free(names);
+    defer {
+        for (names) |n| alloc.free(n);
+        alloc.free(names);
+    }
 
     try std.testing.expect(names.len >= 2);
 }
+
+test "Multiple tables create, read, drop" {
+    const alloc = std.testing.allocator;
+    var db = try ZDBC().init("DB_multitable", alloc);
+    defer db.deinit();
+
+    var cols = [_]ColumnSchema{.{ .name = "id", .col_type = .I64 }};
+
+    try db.createTable("t1", &cols);
+    try db.createTable("t2", &cols);
+    try db.createTable("t3", &cols);
+
+    try std.testing.expect(db.hasTable("t1"));
+    try std.testing.expect(db.hasTable("t2"));
+    try std.testing.expect(db.hasTable("t3"));
+    try std.testing.expect(!db.hasTable("t4"));
+
+    try db.dropTable("t2");
+    try std.testing.expect(!db.hasTable("t2"));
+    try std.testing.expect(db.hasTable("t1"));
+    try std.testing.expect(db.hasTable("t3"));
+}
+
+test "saveColTableParallel + loadColTable data integrity" {
+    const alloc = std.testing.allocator;
+    var db = try ZDBC().init("DB_datacheck", alloc);
+    defer db.deinit();
+
+    var columns = [_]ColumnSchema{
+        .{ .name = "id", .col_type = .I64 },
+        .{ .name = "name", .col_type = .STR8 },
+        .{ .name = "score", .col_type = .F64 },
+    };
+    try db.createTable("players", &columns);
+
+    const schema = TableSchema{
+        .name = try alloc.dupe(u8, "players"),
+        .columns = try alloc.alloc(ColumnSchema, 3),
+        .num_rows = 100,
+    };
+    schema.columns[0] = .{ .name = try alloc.dupe(u8, "id"), .col_type = .I64 };
+    schema.columns[1] = .{ .name = try alloc.dupe(u8, "name"), .col_type = .STR8 };
+    schema.columns[2] = .{ .name = try alloc.dupe(u8, "score"), .col_type = .F64 };
+
+    var table = try ColTable.ColTable.init(schema, alloc);
+    defer table.deinit();
+
+    var rng = std.Random.DefaultPrng.init(42);
+    const names = [_][]const u8{ "Alice", "Bob", "Carl", "Diana" };
+    for (0..100) |i| {
+        try table.setI64("id", i, @intCast(i * 2));
+        try table.setStr8("name", i, names[rng.random().uintLessThan(usize, names.len)]);
+        try table.setF64("score", i, @as(f64, @floatFromInt(rng.random().uintLessThan(u32, 100000))) / 100.0);
+    }
+
+    try db.saveColTableParallel("players", &table);
+    var loaded = try db.loadColTable("players");
+    defer loaded.deinit();
+
+    try std.testing.expectEqual(@as(u64, 100), loaded.rowCount());
+    for (0..100) |i| {
+        try std.testing.expectEqual(@as(i64, @intCast(i * 2)), loaded.columns[0].I64[i]);
+        // score should match exactly (no precision loss for integers/100)
+        try std.testing.expectEqual(table.columns[2].F64[i], loaded.columns[2].F64[i]);
+    }
+    // STR8 must round-trip
+    for (0..100) |i| {
+        try std.testing.expectEqual(table.columns[1].STR8[i], loaded.columns[1].STR8[i]);
+    }
+}
+
+test "readColumns with specific column subset" {
+    const alloc = std.testing.allocator;
+    var db = try ZDBC().init("DB_subset", alloc);
+    defer db.deinit();
+
+    var columns = [_]ColumnSchema{
+        .{ .name = "id", .col_type = .I64 },
+        .{ .name = "name", .col_type = .STR8 },
+        .{ .name = "score", .col_type = .F64 },
+    };
+    try db.createTable("items", &columns);
+
+    const schema = TableSchema{
+        .name = try alloc.dupe(u8, "items"),
+        .columns = try alloc.alloc(ColumnSchema, 3),
+        .num_rows = 5,
+    };
+    schema.columns[0] = .{ .name = try alloc.dupe(u8, "id"), .col_type = .I64 };
+    schema.columns[1] = .{ .name = try alloc.dupe(u8, "name"), .col_type = .STR8 };
+    schema.columns[2] = .{ .name = try alloc.dupe(u8, "score"), .col_type = .F64 };
+
+    var table = try ColTable.ColTable.init(schema, alloc);
+    defer table.deinit();
+    for (0..5) |i| {
+        try table.setI64("id", i, @intCast(i + 1));
+        try table.setStr8("name", i, "Item");
+        try table.setF64("score", i, @floatFromInt(i));
+    }
+    try db.saveColTable("items", &table);
+
+    // Read only id + score (skip name)
+    const subset = try db.readColumns("items", &.{ "id", "score" });
+    defer {
+        for (subset) |*cd| cd.deinit(alloc);
+        alloc.free(subset);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), subset.len);
+    try std.testing.expectEqual(@as(i64, 1), subset[0].I64[0]);
+    try std.testing.expectEqual(@as(i64, 5), subset[0].I64[4]);
+    try std.testing.expectEqual(@as(f64, 0.0), subset[1].F64[0]);
+    try std.testing.expectEqual(@as(f64, 4.0), subset[1].F64[4]);
+}
+
+test "Table with 0 and 1 row" {
+    const alloc = std.testing.allocator;
+    var db = try ZDBC().init("DB_tiny", alloc);
+    defer db.deinit();
+
+    var columns = [_]ColumnSchema{.{ .name = "id", .col_type = .I64 }};
+    try db.createTable("zero", &columns);
+
+    // 0 rows
+    var schema0 = TableSchema{
+        .name = try alloc.dupe(u8, "zero"),
+        .columns = try alloc.alloc(ColumnSchema, 1),
+        .num_rows = 0,
+    };
+    schema0.columns[0] = .{ .name = try alloc.dupe(u8, "id"), .col_type = .I64 };
+    var table0 = try ColTable.ColTable.init(schema0, alloc);
+    defer table0.deinit();
+    try db.saveColTable("zero", &table0);
+    var loaded0 = try db.loadColTable("zero");
+    defer loaded0.deinit();
+    try std.testing.expectEqual(@as(u64, 0), loaded0.rowCount());
+
+    // 1 row
+    try db.createTable("one", &columns);
+    var schema1 = TableSchema{
+        .name = try alloc.dupe(u8, "one"),
+        .columns = try alloc.alloc(ColumnSchema, 1),
+        .num_rows = 1,
+    };
+    schema1.columns[0] = .{ .name = try alloc.dupe(u8, "id"), .col_type = .I64 };
+    var table1 = try ColTable.ColTable.init(schema1, alloc);
+    defer table1.deinit();
+    try table1.setI64("id", 0, 42);
+    try db.saveColTable("one", &table1);
+    var loaded1 = try db.loadColTable("one");
+    defer loaded1.deinit();
+    try std.testing.expectEqual(@as(u64, 1), loaded1.rowCount());
+    try std.testing.expectEqual(@as(i64, 42), loaded1.columns[0].I64[0]);
+}
+
+test "Table with many columns" {
+    const alloc = std.testing.allocator;
+    var db = try ZDBC().init("DB_wide", alloc);
+    defer db.deinit();
+
+    const ncols = 20;
+    var columns = try alloc.alloc(ColumnSchema, ncols);
+    defer {
+        for (columns) |c| alloc.free(c.name);
+        alloc.free(columns);
+    }
+    for (0..ncols) |i| {
+        var name_buf: [8]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buf, "c{d}", .{i});
+        columns[i] = .{ .name = try alloc.dupe(u8, name), .col_type = .I64 };
+    }
+
+    try db.createTable("wide", columns);
+
+    var schema = TableSchema{
+        .name = try alloc.dupe(u8, "wide"),
+        .columns = try alloc.alloc(ColumnSchema, ncols),
+        .num_rows = 10,
+    };
+    for (0..ncols) |i| {
+        var name_buf: [8]u8 = undefined;
+        const name = try std.fmt.bufPrint(&name_buf, "c{d}", .{i});
+        schema.columns[i] = .{ .name = try alloc.dupe(u8, name), .col_type = .I64 };
+    }
+
+    var table = try ColTable.ColTable.init(schema, alloc);
+    defer table.deinit();
+    for (0..ncols) |c| {
+        for (0..10) |r| {
+            try table.setI64(table.schema.columns[c].name, r, @intCast(c * 100 + r));
+        }
+    }
+
+    try db.saveColTable("wide", &table);
+    var loaded = try db.loadColTable("wide");
+    defer loaded.deinit();
+
+    try std.testing.expectEqual(@as(u64, 10), loaded.rowCount());
+    try std.testing.expectEqual(@as(usize, ncols), loaded.colCount());
+    try std.testing.expectEqual(@as(i64, 507), loaded.columns[5].I64[7]);
+    try std.testing.expectEqual(@as(i64, 1900), loaded.columns[19].I64[0]);
+}
+

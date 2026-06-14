@@ -201,6 +201,7 @@ const ColumnReadJob = struct {
 fn columnReadFn(job: *ColumnReadJob, io: Io, allocator: std.mem.Allocator, dir: Io.Dir, table_name: []const u8, num_rows: u64) void {
     job.result = readColumnFile(io, allocator, dir, table_name, job.name, job.col_type, num_rows) catch |err| {
         job.err = err;
+        return;
     };
 }
 
@@ -473,4 +474,213 @@ test "full table save/load roundtrip" {
     try std.testing.expectEqual(@as(f64, 10.5), loaded.columns[2].F64[0]);
     try std.testing.expectEqual(@as(f64, 20.5), loaded.columns[2].F64[1]);
     try std.testing.expectEqual(@as(f64, 30.5), loaded.columns[2].F64[2]);
+}
+
+test "readColumnFileIntoBuf correct and wrong buffer size" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const i64_data = try allocator.alloc(i64, 3);
+    defer allocator.free(i64_data);
+    i64_data[0] = 100;
+    i64_data[1] = 200;
+    i64_data[2] = 300;
+
+    try writeColumnFile(std.testing.io, allocator, tmp.dir, "test", "id", .{ .I64 = i64_data });
+
+    var out_buf: [24]u8 align(@alignOf(i64)) = undefined;
+    try readColumnFileIntoBuf(std.testing.io, allocator, tmp.dir, "test", "id", .I64, 3, &out_buf);
+    const loaded = std.mem.bytesAsSlice(i64, &out_buf);
+    try std.testing.expectEqualSlices(i64, i64_data, loaded);
+
+    var bad_buf: [16]u8 = undefined;
+    try std.testing.expectError(error.InvalidFormat, readColumnFileIntoBuf(std.testing.io, allocator, tmp.dir, "test", "id", .I64, 3, &bad_buf));
+}
+
+test "readColumnFileIntoBuf for all types" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const schema = makeTestSchema(allocator, "alltypes", 1);
+    // schema is consumed by ColTable.init below — table.deinit frees it
+
+    var table = try ColTable.ColTable.init(schema, allocator);
+    defer table.deinit();
+    try table.setI64("id", 0, 42);
+    try table.setStr8("name", 0, "TEST");
+    try table.setF64("score", 0, 99.5);
+
+    try saveColTable(std.testing.io, allocator, tmp.dir, "alltypes", &table);
+
+    // Read each type via readColumnFileIntoBuf
+    var i64_buf: [8]u8 align(@alignOf(i64)) = undefined;
+    try readColumnFileIntoBuf(std.testing.io, allocator, tmp.dir, "alltypes", "id", .I64, 1, &i64_buf);
+    try std.testing.expectEqual(@as(i64, 42), @as(*const i64, @ptrCast(@alignCast(&i64_buf))).*);
+
+    var f64_buf: [8]u8 align(@alignOf(f64)) = undefined;
+    try readColumnFileIntoBuf(std.testing.io, allocator, tmp.dir, "alltypes", "score", .F64, 1, &f64_buf);
+    try std.testing.expectEqual(@as(f64, 99.5), @as(*const f64, @ptrCast(@alignCast(&f64_buf))).*);
+
+    var str8_buf: [8]u8 = undefined;
+    try readColumnFileIntoBuf(std.testing.io, allocator, tmp.dir, "alltypes", "name", .STR8, 1, &str8_buf);
+    try std.testing.expectEqualStrings("TEST", std.mem.trimEnd(u8, &str8_buf, " "));
+}
+
+test "loadColTable / loadColTableParallel round-trip" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const schema = makeTestSchema(allocator, "roundtrip", 2);
+
+    var table = try ColTable.ColTable.init(schema, allocator);
+    defer table.deinit();
+    try table.setI64("id", 0, 1);
+    try table.setI64("id", 1, 2);
+    try table.setStr8("name", 0, "Alice");
+    try table.setStr8("name", 1, "Bob");
+    try table.setF64("score", 0, 10.0);
+    try table.setF64("score", 1, 20.0);
+
+    try saveColTable(std.testing.io, allocator, tmp.dir, "roundtrip", &table);
+
+    // Test that loadColTableParallel produces same result as loadColTable
+    var loaded_seq = try loadColTable(std.testing.io, allocator, tmp.dir, "roundtrip");
+    defer loaded_seq.deinit();
+    var loaded_par = try loadColTableParallel(std.testing.io, allocator, tmp.dir, "roundtrip");
+    defer loaded_par.deinit();
+
+    try std.testing.expectEqual(@as(u64, 2), loaded_par.rowCount());
+    try std.testing.expectEqual(loaded_seq.columns[0].I64[0], loaded_par.columns[0].I64[0]);
+    try std.testing.expectEqual(loaded_seq.columns[0].I64[1], loaded_par.columns[0].I64[1]);
+    try std.testing.expectEqual(loaded_seq.columns[1].STR8[0], loaded_par.columns[1].STR8[0]);
+    try std.testing.expectEqual(loaded_seq.columns[2].F64[0], loaded_par.columns[2].F64[0]);
+}
+
+test "saveColTable / saveColTableParallel round-trip" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const schema = makeTestSchema(allocator, "savepar", 1);
+
+    var table = try ColTable.ColTable.init(schema, allocator);
+    defer table.deinit();
+    try table.setI64("id", 0, 999);
+    try table.setStr8("name", 0, "Parallel");
+    try table.setF64("score", 0, 42.42);
+
+    // Save with parallel, load with sequential (and vice-versa)
+    try saveColTableParallel(std.testing.io, allocator, tmp.dir, "savepar", &table);
+    var loaded = try loadColTable(std.testing.io, allocator, tmp.dir, "savepar");
+    defer loaded.deinit();
+
+    try std.testing.expectEqual(@as(i64, 999), loaded.columns[0].I64[0]);
+    try std.testing.expectEqualStrings("Parallel", try loaded.getStr8("name", 0));
+    try std.testing.expectEqual(@as(f64, 42.42), loaded.columns[2].F64[0]);
+}
+
+test "readColumnFilesParallel with 0 and 1 columns" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    // 0 columns — should succeed, no-op
+    var empty_results: [0]ColumnData = undefined;
+    var empty_slice: []ColumnData = &empty_results;
+    try readColumnFilesParallel(std.testing.io, allocator, tmp.dir, "test", &.{}, 0, &empty_slice);
+
+    // 1 column — falls through to simple path
+    const schema = makeTestSchema(allocator, "onecol", 1);
+    var table = try ColTable.ColTable.init(schema, allocator);
+    defer table.deinit();
+    try table.setI64("id", 0, 123);
+    try saveColTable(std.testing.io, allocator, tmp.dir, "onecol", &table);
+
+    // Create a fresh schema for loading (original schema was consumed by init above)
+    const load_schema = makeTestSchema(allocator, "onecol", 1);
+    var loaded = try ColTable.ColTable.initLazy(load_schema, allocator);
+    defer loaded.deinit();
+    try readColumnFilesParallel(std.testing.io, allocator, tmp.dir, "onecol", loaded.schema.columns, 1, &loaded.columns);
+    try std.testing.expectEqual(@as(i64, 123), loaded.columns[0].I64[0]);
+}
+
+test "writeColumnFilesParallel (sequential fallback for small data)" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    const schema = makeTestSchema(allocator, "writefallback", 1);
+
+    var table = try ColTable.ColTable.init(schema, allocator);
+    defer table.deinit();
+    try table.setI64("id", 0, 7);
+    try table.setStr8("name", 0, "Fallback");
+    try table.setF64("score", 0, 1.23);
+
+    // writeColumnFilesParallel writes column data but not schema — write schema first
+    try writeSchema(std.testing.io, allocator, tmp.dir, "writefallback", &table.schema);
+    try writeColumnFilesParallel(std.testing.io, allocator, tmp.dir, "writefallback", table.schema.columns, table.columns);
+
+    var loaded = try loadColTable(std.testing.io, allocator, tmp.dir, "writefallback");
+    defer loaded.deinit();
+    try std.testing.expectEqual(@as(i64, 7), loaded.columns[0].I64[0]);
+    try std.testing.expectEqualStrings("Fallback", try loaded.getStr8("name", 0));
+    try std.testing.expectEqual(@as(f64, 1.23), loaded.columns[2].F64[0]);
+}
+
+test "readSchema TableNotFound" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try std.testing.expectError(error.TableNotFound, readSchema(std.testing.io, allocator, tmp.dir, "nonexistent"));
+}
+
+test "readColumnFile ColumnNotFound" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    try std.testing.expectError(error.ColumnNotFound, readColumnFile(std.testing.io, allocator, tmp.dir, "test", "nope", .I64, 10));
+}
+
+test "table with 0 rows saves and loads" {
+    const allocator = std.testing.allocator;
+    var tmp = std.testing.tmpDir(.{});
+    defer tmp.cleanup();
+
+    var columns = try allocator.alloc(ColumnSchema, 1);
+    columns[0] = .{ .name = try allocator.dupe(u8, "empty"), .col_type = .I64 };
+
+    const schema = TableSchema{
+        .name = try allocator.dupe(u8, "empty_table"),
+        .columns = columns,
+        .num_rows = 0,
+    };
+
+    var table = try ColTable.ColTable.init(schema, allocator);
+    defer table.deinit();
+
+    try saveColTable(std.testing.io, allocator, tmp.dir, "empty_table", &table);
+    var loaded = try loadColTable(std.testing.io, allocator, tmp.dir, "empty_table");
+    defer loaded.deinit();
+
+    try std.testing.expectEqual(@as(u64, 0), loaded.rowCount());
+    try std.testing.expectEqual(@as(usize, 0), loaded.columns[0].I64.len);
+}
+
+fn makeTestSchema(allocator: std.mem.Allocator, name: []const u8, num_rows: u64) TableSchema {
+    var columns = allocator.alloc(ColumnSchema, 3) catch unreachable;
+    columns[0] = .{ .name = allocator.dupe(u8, "id") catch unreachable, .col_type = .I64 };
+    columns[1] = .{ .name = allocator.dupe(u8, "name") catch unreachable, .col_type = .STR8 };
+    columns[2] = .{ .name = allocator.dupe(u8, "score") catch unreachable, .col_type = .F64 };
+
+    return TableSchema{
+        .name = allocator.dupe(u8, name) catch unreachable,
+        .columns = columns,
+        .num_rows = num_rows,
+    };
 }

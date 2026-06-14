@@ -252,3 +252,121 @@ test "Str8 padding and trimming" {
     const s1 = try table.getStr8("code", 1);
     try std.testing.expectEqualStrings("LONGNAME", s1);
 }
+
+test "initLazy creates empty columns, deinit safely" {
+    const allocator = std.testing.allocator;
+
+    var columns = try allocator.alloc(ColumnSchema, 3);
+    columns[0] = .{ .name = try allocator.dupe(u8, "id"), .col_type = .I64 };
+    columns[1] = .{ .name = try allocator.dupe(u8, "name"), .col_type = .STR8 };
+    columns[2] = .{ .name = try allocator.dupe(u8, "score"), .col_type = .F64 };
+
+    const schema = TableSchema{
+        .name = try allocator.dupe(u8, "players"),
+        .columns = columns,
+        .num_rows = 100,
+    };
+
+    var table = try ColTable.initLazy(schema, allocator);
+    defer table.deinit();
+
+    try std.testing.expectEqual(@as(u64, 100), table.rowCount());
+    try std.testing.expectEqual(@as(usize, 3), table.colCount());
+    // Empty columns: len = 0, deinit should be a no-op (tested by defer)
+}
+
+test "setStr8 exact 8 chars, empty string, max-length" {
+    const allocator = std.testing.allocator;
+
+    var columns = try allocator.alloc(ColumnSchema, 1);
+    columns[0] = .{ .name = try allocator.dupe(u8, "str"), .col_type = .STR8 };
+
+    const schema = TableSchema{
+        .name = try allocator.dupe(u8, "test"),
+        .columns = columns,
+        .num_rows = 3,
+    };
+
+    var table = try ColTable.init(schema, allocator);
+    defer table.deinit();
+
+    // Exact 8 chars — no padding
+    try table.setStr8("str", 0, "ABCDEFGH");
+    try std.testing.expectEqualStrings("ABCDEFGH", try table.getStr8("str", 0));
+
+    // Empty string — all spaces, trim returns ""
+    try table.setStr8("str", 1, "");
+    try std.testing.expectEqualStrings("", try table.getStr8("str", 1));
+
+    // max-length (8 already tested above)
+    const raw = table.columns[0].STR8[0];
+    try std.testing.expectEqual(@as(u8, 'A'), raw[0]);
+    try std.testing.expectEqual(@as(u8, 'H'), raw[7]);
+}
+
+test "setI64/setF64 with min/max values" {
+    const allocator = std.testing.allocator;
+
+    var columns = try allocator.alloc(ColumnSchema, 2);
+    columns[0] = .{ .name = try allocator.dupe(u8, "i"), .col_type = .I64 };
+    columns[1] = .{ .name = try allocator.dupe(u8, "f"), .col_type = .F64 };
+
+    const schema = TableSchema{
+        .name = try allocator.dupe(u8, "test"),
+        .columns = columns,
+        .num_rows = 2,
+    };
+
+    var table = try ColTable.init(schema, allocator);
+    defer table.deinit();
+
+    // i64 extremes
+    try table.setI64("i", 0, std.math.minInt(i64));
+    try table.setI64("i", 1, std.math.maxInt(i64));
+    try std.testing.expectEqual(std.math.minInt(i64), table.columns[0].I64[0]);
+    try std.testing.expectEqual(std.math.maxInt(i64), table.columns[0].I64[1]);
+
+    // f64 extremes and NaN
+    try table.setF64("f", 0, std.math.nan(f64));
+    try table.setF64("f", 1, -0.0);
+    try std.testing.expect(std.math.isNan(table.columns[1].F64[0]));
+    try std.testing.expectEqual(@as(f64, -0.0), table.columns[1].F64[1]);
+}
+
+test "columnIndex out of bounds returns null" {
+    const allocator = std.testing.allocator;
+
+    var columns = try allocator.alloc(ColumnSchema, 1);
+    columns[0] = .{ .name = try allocator.dupe(u8, "id"), .col_type = .I64 };
+
+    const schema = TableSchema{
+        .name = try allocator.dupe(u8, "test"),
+        .columns = columns,
+        .num_rows = 1,
+    };
+
+    var table = try ColTable.init(schema, allocator);
+    defer table.deinit();
+
+    try std.testing.expectEqual(@as(?ColumnData, null), table.columnIndex(1));
+    try std.testing.expectEqual(@as(?usize, null), table.schema.columnIndex("nonexistent"));
+}
+
+test "setI64 on wrong type returns TypeMismatch" {
+    const allocator = std.testing.allocator;
+
+    var columns = try allocator.alloc(ColumnSchema, 1);
+    columns[0] = .{ .name = try allocator.dupe(u8, "str"), .col_type = .STR8 };
+
+    const schema = TableSchema{
+        .name = try allocator.dupe(u8, "test"),
+        .columns = columns,
+        .num_rows = 1,
+    };
+
+    var table = try ColTable.init(schema, allocator);
+    defer table.deinit();
+
+    try std.testing.expectError(error.TypeMismatch, table.setI64("str", 0, 42));
+    try std.testing.expectError(error.TypeMismatch, table.setF64("str", 0, 3.14));
+}

@@ -54,6 +54,23 @@ Strings are **always 8 bytes**, right-padded with spaces. This gives O(1) random
 access, fixed stride per row, and direct memory mapping to numpy `S8` arrays. No
 pointers, no heap indirection, no per-element parsing.
 
+#### STR8 Padding in Python
+
+The padding format depends on which C ABI path was used:
+
+| Path | C function | Padding | numpy dtype | Example |
+|------|-----------|---------|-------------|---------|
+| `read_column()` | `zdbc_read_column` | space `0x20` (raw disk bytes) | `S8` | `b'Alice   '` |
+| `read_table()` batch | `zdbc_read_table` | null `0x00` (after `trimStr8Buffer`) | `S8` | `b'Alice\x00\x00\x00'` |
+| `read_columns()` default | calls `read_table` | null | `S8` | — |
+| `read_columns(col_names=…)` | calls `read_column` per col | space | `S8` | — |
+| `load_table()` → DataFrame | `read_columns` → `S8` → `.rstrip(b'\x00 ').decode()` | decoded to Python `str` | `object` | `'Alice'` |
+
+Both paths produce valid numpy `S8` arrays. The `load_table()` convenience
+wrapper decodes each STR8 element via `rstrip(bytes)→decode()` on the Python
+side (handles both space-padded and null-padded data) before constructing the
+DataFrame.
+
 ### Data Flow
 
 ```
@@ -267,10 +284,10 @@ on AMD Ryzen, Linux, NVMe SSD.
 
 | Metric | Time |
 |--------|------|
-| `write_table` | 9.61 ms |
-| `read_columns` (all cols) | 0.40 ms |
+| `write_table` | 9.24 ms |
+| `read_columns` (all cols) | 0.34 ms |
 | `read_column` (single) | 0.03 ms |
-| `load_table` (→DataFrame) | 1.85 ms |
+| `load_table` (→DataFrame) | 4.36 ms |
 
 Run benchmarks:
 ```bash
@@ -288,4 +305,30 @@ zig build shared       # libzdbc.so (Python)
 zig build test         # all tests
 zig build run          # CLI example
 zig build col_perf     # column benchmark
+```
+
+### Testing
+
+**Zig unit tests** (30 tests, in `src/`):
+- ColTable: init/lazy, STR8 padding/trimming, edge values (i64 min/max, f64 NaN/±inf),
+  type mismatch errors, out-of-bounds access
+- ColumnIO: schema read/write, column file round-trip, read-into-buffer, parallel
+  read/write with auto-detection threshold, 0/1-column edge cases, not-found errors,
+  0-row tables
+- root.zig: init/deinit, create/drop/list tables, save/load round-trip, parallel
+  variants, read specific column subsets, multi-table independence, 20-column wide
+  tables, 0/1-row edge cases
+
+**Python C ABI tests** (54 tests, `test_python_cabi.py`):
+- Data integrity: write → read every value for I64, F64, STR8 columns
+- Edge values: i64 min/max, f64 NaN/±inf/±0, STR8 empty/8-char
+- Multi-table isolation, drop-and-recreate, 0/1/10k row sizes
+- STR8 padding round-trip, F64 precision (1e-15 rel_tol)
+- `read_column` raw numpy path vs `read_table` batch path vs `read_columns` subset
+- Raw speed test: direct C ABI → numpy (no pandas), measuring pure I/O latency
+- Error handling: non-existent tables, non-existent columns
+
+```bash
+zig build test                        # Zig: 30 tests
+python test_python_cabi.py            # Python: 54 tests
 ```
