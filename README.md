@@ -263,20 +263,6 @@ python examples/benchmarks/bench_column.py    # Python comparison
 
 ---
 
-## Installation (Zig Package)
-
-```bash
-zig fetch --save https://github.com/Neon32eeee/ZDBC.zig/archive/refs/heads/main.tar.gz
-```
-
-`build.zig`:
-```zig
-const ddb = b.dependency("ddb", .{ .target = target, .optimize = optimize });
-exe.root_module.addImport("ddb", ddb.module("ddb"));
-```
-
----
-
 ## Commands
 
 ```bash
