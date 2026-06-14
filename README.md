@@ -35,12 +35,15 @@ the old `std.fs` blocking-I/O API with explicit `Io` vtable dispatch, enabling:
 
 ```
 DB                          # table name registry (binary)
-DBdir/
+DBdir/                       # data directory (auto-created)
   players.schema            # column names, types, row count
   players.id                # raw i64[n_rows]
   players.name              # raw u8[8 * n_rows]  (fixed 8-char, space-padded)
   players.score             # raw f64[n_rows]
 ```
+
+Intermediate directories in table names are automatically created. For example,
+`db.create_table("data/players", ...)` stores files under `DBdir/data/`:
 
 Every column lives in its own file with **fixed-width binary layout**:
 
@@ -64,7 +67,7 @@ The padding format depends on which C ABI path was used:
 | `read_table()` batch | `zdbc_read_table` | null `0x00` (after `trimStr8Buffer`) | `S8` | `b'Alice\x00\x00\x00'` |
 | `read_columns()` default | calls `read_table` | null | `S8` | — |
 | `read_columns(col_names=…)` | calls `read_column` per col | space | `S8` | — |
-| `load_table()` → DataFrame | `read_columns` → `S8` | bytes columns (native S8) | `object` | `b'Alice\x00\x00\x00'` |
+| `load_table()` → DataFrame | `read_columns` → `SX` | bytes columns (native SX trimmed) | `object` | `b'Alice'` |
 
 Both paths produce valid numpy `S8` arrays. `load_table()` returns them as-is
 (bytes columns in the DataFrame); call `.str.decode()` to convert to Python `str`

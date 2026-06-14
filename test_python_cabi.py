@@ -141,7 +141,7 @@ df_str = pd.DataFrame({"tag": ["AB", "LONGNAME", "", "XY"]})
 db.create_table("str_only", {"tag": "str"})
 db.write_table("str_only", df_str)
 loaded = db.load_table("str_only")
-
+print("----------", _s8_to_str(loaded["tag"].iloc[0]), loaded["tag"].iloc[0])
 check(_s8_to_str(loaded["tag"].iloc[0]) == "AB", "2-char STR8 not trimmed")
 check(_s8_to_str(loaded["tag"].iloc[1]) == "LONGNAME", "8-char STR8 truncated")
 check(_s8_to_str(loaded["tag"].iloc[2]) == "", "empty STR8 not preserved")
@@ -280,6 +280,7 @@ check(len(arr_str8) == n, f"raw STR8 count: {len(arr_str8)}")
 check(all(len(bytes(b)) == 8 for b in arr_str8[:100]), "STR8 row width")
 free_column(db._ptr, data_ptr, count, col_type)
 print(f"  STR8 raw bytes:               {STR8_LEN} bytes/row × {n} rows")
+print("-------------", arr_str8[0])
 
 # 3) read_table — batch C ABI
 times = []

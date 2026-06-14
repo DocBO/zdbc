@@ -8,6 +8,17 @@ pub const TableSchema = ColTable.TableSchema;
 pub const ColumnData = ColTable.ColumnData;
 pub const STR8_LEN = ColTable.STR8_LEN;
 
+/// Ensures intermediate directories exist for a file path containing `/`.
+/// If file_name has no path separator, this is a no-op.
+pub fn ensureFilePath(io: Io, dir: Io.Dir, file_name: []const u8) !void {
+    if (std.mem.lastIndexOfScalar(u8, file_name, '/')) |slash_pos| {
+        dir.createDirPath(io, file_name[0..slash_pos]) catch |err| switch (err) {
+            error.PathAlreadyExists => {},
+            else => return err,
+        };
+    }
+}
+
 fn writeIntLe(buf: []u8, comptime T: type, pos: *usize, value: T) void {
     std.mem.writeInt(T, buf[pos.*..][0..@sizeOf(T)], value, .little);
     pos.* += @sizeOf(T);
@@ -24,6 +35,7 @@ pub fn writeSchema(io: Io, allocator: std.mem.Allocator, dir: Io.Dir, table_name
     var schema_name_buf: [256]u8 = undefined;
     const schema_name = try std.fmt.bufPrint(&schema_name_buf, "{s}.schema", .{table_name});
 
+    try ensureFilePath(io, dir, schema_name);
     var file = try dir.createFile(io, schema_name, .{});
     defer file.close(io);
 
@@ -46,6 +58,7 @@ pub fn readSchema(io: Io, allocator: std.mem.Allocator, dir: Io.Dir, table_name:
     var schema_name_buf: [256]u8 = undefined;
     const schema_name = try std.fmt.bufPrint(&schema_name_buf, "{s}.schema", .{table_name});
 
+    try ensureFilePath(io, dir, schema_name);
     var file = dir.openFile(io, schema_name, .{}) catch |err| {
         if (err == error.FileNotFound) return error.TableNotFound;
         return err;
@@ -95,6 +108,7 @@ pub fn readColumnFile(io: Io, allocator: std.mem.Allocator, dir: Io.Dir, table_n
     var file_name_buf: [256]u8 = undefined;
     const file_name = try std.fmt.bufPrint(&file_name_buf, "{s}.{s}", .{table_name, col_name});
 
+    try ensureFilePath(io, dir, file_name);
     var file = dir.openFile(io, file_name, .{}) catch |err| {
         if (err == error.FileNotFound) return error.ColumnNotFound;
         return err;
@@ -138,6 +152,7 @@ pub fn readColumnFileIntoBuf(io: Io, allocator: std.mem.Allocator, dir: Io.Dir, 
     var file_name_buf: [256]u8 = undefined;
     const file_name = try std.fmt.bufPrint(&file_name_buf, "{s}.{s}", .{table_name, col_name});
 
+    try ensureFilePath(io, dir, file_name);
     var file = dir.openFile(io, file_name, .{}) catch |err| {
         if (err == error.FileNotFound) return error.ColumnNotFound;
         return err;
@@ -155,6 +170,7 @@ pub fn writeColumnFile(io: Io, allocator: std.mem.Allocator, dir: Io.Dir, table_
     var file_name_buf: [256]u8 = undefined;
     const file_name = try std.fmt.bufPrint(&file_name_buf, "{s}.{s}", .{table_name, col_name});
 
+    try ensureFilePath(io, dir, file_name);
     var file = try dir.createFile(io, file_name, .{});
     defer file.close(io);
 
@@ -285,6 +301,10 @@ fn columnWriteFn(job: *ColumnWriteJob, io: Io, dir: Io.Dir, table_name: []const 
         job.err = error.NameTooLong;
         return;
     };
+    ensureFilePath(io, dir, file_name) catch |err| {
+        job.err = err;
+        return;
+    };
     var file = dir.createFile(io, file_name, .{}) catch |err| {
         job.err = err;
         return;
@@ -353,6 +373,7 @@ pub fn writeRawColumns(io: Io, allocator: std.mem.Allocator, dir: Io.Dir, table_
         var file_name_buf: [256]u8 = undefined;
         const file_name = try std.fmt.bufPrint(&file_name_buf, "{s}.{s}", .{table_name, col.name});
 
+        try ensureFilePath(io, dir, file_name);
         var file = try dir.createFile(io, file_name, .{});
         defer file.close(io);
 

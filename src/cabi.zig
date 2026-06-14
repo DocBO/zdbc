@@ -296,6 +296,7 @@ export fn zdbc_write_table(db: *ZDBC, name: [*:0]const u8, col_names: [*]const [
         const byte_len = rows * ct.sizeOf();
 
         const file_name = std.mem.concat(aa, u8, &.{ name_slice, ".", schemas[i].name }) catch return -6;
+        ColumnIO.ensureFilePath(db.io, dir, file_name) catch |err| return mapError(err);
         var file = dir.createFile(db.io, file_name, .{}) catch |err| return mapError(err);
         defer file.close(db.io);
         file.writeStreamingAll(db.io, @as([*]const u8, @ptrCast(ptr))[0..byte_len]) catch return -6;
