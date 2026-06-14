@@ -12,22 +12,14 @@ column retrieval, and direct numpy array access from Python.
 
 **Requirements:** Zig `0.16.0`, Linux / macOS. Python bindings require `numpy` and optionally `pandas`.
 
-### Zig 0.16.0 & I/O Overhaul
+### Main Use Cases
 
-ZDBC has been ported to Zig 0.16.0's new `std.Io` subsystem. The migration replaces
-the old `std.fs` blocking-I/O API with explicit `Io` vtable dispatch, enabling:
+- all kind of analytics with only 3 data types (optimal for scientific data series of medium size)
+- easy python integration
+- super fast read/write of columns (huge improvement over Feather and Parquet in columns read mode)
+- no incremental read/write and no database query filtering: shifted towards python pandas
 
-- **Batched multi-column reads** — `zdbc_read_table` reads all column data directly into
-  a single contiguous output buffer, eliminating per-column alloc+copy+free cycles.
-- **Lazy column init** — `ColTable.initLazy` skips pre-allocation of column arrays
-  when loading from disk, avoiding 10 redundant mmap/munmap syscalls for 5-column tables.
-- **Parallel column reads & writes** — `loadColTableParallel` / `saveColTableParallel`
-  spawn one thread per column file. An auto-detection heuristic checks `num_rows × 8`
-  per column: below ~100 KB (~12,500 rows) the call falls back to sequential I/O since
-  thread spawn overhead would dominate. Write parallelism mainly benefits the warm path;
-  cold writes are bottlenecked by filesystem block allocation.
-- **Stack-allocated file names** — all `"{table}.{column}"` path construction uses
-  `bufPrint` into a 256-byte stack buffer, eliminating per-call heap allocations.
+
 
 ## Architecture
 
