@@ -165,6 +165,14 @@ pub fn readColumnFileIntoBuf(io: Io, allocator: std.mem.Allocator, dir: Io.Dir, 
     if (bytes_read != expected_size) return error.InvalidFormat;
 }
 
+/// Reads columns directly into caller-provided, non-overlapping buffers.
+pub fn readColumnFilesIntoBuf(io: Io, allocator: std.mem.Allocator, dir: Io.Dir, table_name: []const u8, columns: []const ColumnSchema, num_rows: u64, out_buffers: []const []u8) !void {
+    if (columns.len != out_buffers.len) return error.InvalidFormat;
+    for (columns, out_buffers) |col, out_buf| {
+        try readColumnFileIntoBuf(io, allocator, dir, table_name, col.name, col.col_type, num_rows, out_buf);
+    }
+}
+
 pub fn writeColumnFile(io: Io, allocator: std.mem.Allocator, dir: Io.Dir, table_name: []const u8, col_name: []const u8, data: ColumnData) !void {
     _ = allocator;
     var file_name_buf: [256]u8 = undefined;

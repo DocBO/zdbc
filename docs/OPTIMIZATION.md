@@ -1,8 +1,8 @@
 # Optimization Plan
 
-**Status:** P0-P2 IMPLEMENTED (P2.1 deferred)
-**Date:** 2026-06-14
-**Scope:** P0–P2 bottlenecks. P3 (mmap, name packing, schema stack buffer) postponed.
+**Status:** P0-P2 IMPLEMENTED; P3 CANDIDATE REJECTED FOR DEFAULT ENABLEMENT
+**Date:** 2026-07-31
+**Scope:** P0–P3 I/O bottlenecks. mmap remains gated on ownership-safe benchmark results.
 
 ## Results Summary (10k rows × 5 columns)
 
@@ -64,12 +64,12 @@ Schema is persisted via new `db.saveTableSchema()` method.
 
 ---
 
-## P2 — Moderate (I/O parallelism, write encoding) ✓ DONE (P2.1 deferred)
+## P2 — Moderate (I/O parallelism, write encoding) ✓ DONE
 
-### P2.1: Parallel column file I/O — DEFERRED
+### P2.1: Parallel column file I/O ✓
 
-Requires `std.Thread` pool and careful synchronization for column file creation.
-Moderate gains (~2–3× on SSD for wide tables). Deferred for future iteration.
+**Status:** DONE in 0.2.0. Native reads and writes use thread-per-column I/O above
+the measured ~100 KB per-column threshold and sequential I/O below it.
 
 ### P2.2: Vectorized STR8 encoding on write ✓
 
@@ -102,3 +102,37 @@ arr = np.char.ljust(raw.astype(f"S{STR8_LEN}"), STR8_LEN)
 8. **P2.3** — Direct single-column read
 
 P0.2 and P0.1 together should bring `load_table` from 7.7 ms to ~1 ms for 10k rows.
+
+---
+
+## P3 — Selected-Column Batch I/O — CANDIDATE RETAINED, DEFAULT REJECTED
+
+### P3.1: Single FFI request for selected columns ✓
+
+Added `zdbc_read_columns`, which validates requested names and returns only those
+columns in the existing contiguous batch layout. The symbol remains additive for
+experimentation, but Python retains repeated `zdbc_read_column` calls because the
+candidate missed its performance gate.
+
+### P3.2: Adaptive direct-to-buffer reads ✓
+
+Selected and all-column batch reads target final non-overlapping output slices.
+Parallel direct-to-buffer reads were tested and rejected; batch reads remain
+sequential because the threaded path regressed measured latency.
+
+### P3.3: Benchmark matrix ✓
+
+`examples/benchmarks/bench_selected.py` compares selected batches with repeated
+single-column reads for 10k, 100k, and 1m rows across 1, 2, 5, 8, and 20 columns.
+The parallel candidate was 61% to 444% slower at 100k rows and 0.8% to 70% slower
+at 1m rows. Sequential direct-to-buffer reads improved the 100k-row one-column case
+by 37%, but regressed 2 columns by 10% and 5 to 20 columns by 67% to 330%. The
+public selected-column path therefore remains unchanged. The benchmark is retained
+to re-evaluate future implementations; profiling should focus on batch parsing and
+the second Python-owned copy before another enablement attempt.
+
+### P3.4: mmap — GATED
+
+mmap is not part of the default path. It requires a separate owner that can safely
+unmap after NumPy releases the view and must beat allocator-backed reads by at least
+15% end to end before a public API is proposed.

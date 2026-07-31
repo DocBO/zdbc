@@ -14,7 +14,7 @@ sys.path.insert(0, PROJECT_ROOT)
 
 from pyzdbc import DB
 from pyzdbc._core import (
-    read_column, free_column, read_table, free_table,
+    read_column, free_column, read_columns, read_table, free_table,
     COL_I64, COL_F64, COL_STR8, STR8_LEN,
     BatchTableHeader, BatchColumnMeta, BATCH_HEADER_SIZE,
 )
@@ -175,6 +175,19 @@ check(len(result) == 2, f"subset col count: {len(result)}")
 check(np.array_equal(result["c0"], df_wide["c0"].values), "subset c0 mismatch")
 check(np.array_equal(result["c2"], df_wide["c2"].values, equal_nan=True), "subset c2 mismatch")
 
+result = db.read_columns("wide", col_names=["c3", "c1", "c3"])
+check(list(result) == ["c3", "c1"], f"subset order/duplicates: {list(result)}")
+check(np.array_equal(result["c1"], df_wide["c1"].values), "subset duplicate request mismatch")
+check(np.array_equal(np.char.rstrip(result["c3"].astype(str)), df_wide["c3"].values), "subset STR8 mismatch")
+check(db.read_columns("wide", col_names=[]) == {}, "empty subset should return an empty dict")
+
+long_name = "column_name_longer_than_batch_metadata_limit"
+df_long = pd.DataFrame({long_name: np.arange(5, dtype=np.int64)})
+db.create_table("long_names", {long_name: "i64"})
+db.write_table("long_names", df_long)
+long_result = db.read_columns("long_names", col_names=[long_name])
+check(list(long_result) == [long_name], "selected batch truncated a requested column name")
+
 # ────────────────────────────────────────────────────────
 section("8. Direct C ABI: read_column vs read_table")
 
@@ -206,6 +219,16 @@ for i in range(hdr.num_columns):
         check(np.array_equal(arr, df_wide[name].values.astype(np.int64)),
               f"batch column '{name}' data mismatch")
 
+selected_data, selected_size = read_columns(db._ptr, "wide", ["c2", "c0"])
+selected_buf = (ctypes.c_char * selected_size).from_address(selected_data.value or 0)
+selected_hdr = BatchTableHeader.from_buffer(selected_buf)
+check(selected_hdr.num_columns == 2, f"selected batch cols: {selected_hdr.num_columns}")
+selected_metas = (BatchColumnMeta * selected_hdr.num_columns).from_buffer(
+    selected_buf, BATCH_HEADER_SIZE
+)
+check(selected_metas[0].name.rstrip(b"\x00") == b"c2", "selected batch order mismatch")
+free_table(db._ptr, selected_data, selected_size)
+
 # ────────────────────────────────────────────────────────
 section("9. Error handling")
 
@@ -218,6 +241,12 @@ except Exception:
 try:
     db.read_column("wide", "nope")
     check(False, "should have raised for nonexistent column")
+except Exception:
+    passed += 1
+
+try:
+    db.read_columns("wide", ["c0", "nope"])
+    check(False, "selected batch should fail atomically for a missing column")
 except Exception:
     passed += 1
 

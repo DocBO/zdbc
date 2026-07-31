@@ -1,5 +1,20 @@
 # CHANGELOG
 
+### PHASE 3 IN PROGRESS: Selected-Column Batch I/O
+
+**Status**: CANDIDATE IMPLEMENTED, DEFAULT ENABLEMENT REJECTED
+**Date Started**: July 31, 2026
+**Focus**: Remove repeated FFI and directory-open overhead from selected-column reads
+
+#### Phase 3 Progress:
+
+- Added an additive selected-column batch C ABI using the existing contiguous batch layout.
+- Added direct-to-final-buffer reads and preserved independent NumPy ownership.
+- Added a selected-column benchmark matrix covering 10k to 1m rows and 1 to 20 columns.
+- Parallel benchmarking showed the candidate 0.8% to 444% slower than repeated reads in measured 100k and 1m-row cases.
+- Sequential 100k-row benchmarking improved one-column latency by 37%, but regressed 2-column latency by 10% and wider requests by 67% to 330%.
+- Kept the existing Python selected-column path and sequential batch I/O as required by the performance gate.
+
 ## [0.2.0] — 2026-06-14
 
 ### Zig 0.16.0 Migration

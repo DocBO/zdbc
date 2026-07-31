@@ -58,10 +58,18 @@ zdbc_table_column_count(*DB, name) → i32
 zdbc_table_column_info(*DB, name, idx, out_name, out_len, *out_type)
 zdbc_read_column(*DB, table, col, *out_data, *out_count, *out_type)
 zdbc_free_sized_column(*DB, data, count, col_type)
+zdbc_read_columns(*DB, table, col_names[], n_cols, *out_data, *out_size)
+zdbc_read_table(*DB, table, *out_data, *out_size)
+zdbc_free_table(*DB, data, size)
 zdbc_write_table(*DB, name, col_names[], col_types[], n_cols, col_data[], n_rows)
 ```
 
 Type codes: 0=I64, 1=F64, 2=STR8. STR8 data is `char[n_rows * 8]`.
+
+`zdbc_read_columns` is an additive experimental ABI that returns the same contiguous
+batch layout as `zdbc_read_table`. Python keeps repeated `zdbc_read_column` calls for
+selected reads because the batch candidate did not meet its multi-column performance
+gate. Both batch functions must be released with `zdbc_free_table`.
 
 ## 3. Python API
 

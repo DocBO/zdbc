@@ -17,7 +17,7 @@ def _read_str8_column(data_ptr, count):
     return arr
 
 
-def _parse_batch_result(data, size):
+def _parse_batch_result(data, size, requested_names=None):
     buf = (ctypes.c_char * size).from_address(data.value or 0)
     hdr = _core.BatchTableHeader.from_buffer(buf)
 
@@ -28,7 +28,7 @@ def _parse_batch_result(data, size):
     result = {}
     for i in range(hdr.num_columns):
         meta = metas[i]
-        name = meta.name.rstrip(b"\x00").decode()
+        name = requested_names[i] if requested_names is not None else meta.name.rstrip(b"\x00").decode()
         offs = meta.data_offset
         ln = meta.byte_len
         col_type = meta.col_type
@@ -95,25 +95,7 @@ class DB:
         if col_names is not None:
             result = {}
             for cname in col_names:
-                data_ptr, count, col_type = _core.read_column(
-                    self._ptr, name, cname
-                )
-                if col_type == COL_I64:
-                    arr = np.ctypeslib.as_array(
-                        ctypes.cast(data_ptr, ctypes.POINTER(ctypes.c_int64)),
-                        shape=(count,),
-                    )
-                    result[cname] = arr.copy()
-                elif col_type == COL_F64:
-                    arr = np.ctypeslib.as_array(
-                        ctypes.cast(data_ptr, ctypes.POINTER(ctypes.c_double)),
-                        shape=(count,),
-                    )
-                    result[cname] = arr.copy()
-                elif col_type == COL_STR8:
-                    arr = _read_str8_column(data_ptr, count)
-                    result[cname] = arr.copy()
-                _core.free_column(self._ptr, data_ptr, count, col_type)
+                result[cname] = self.read_column(name, cname)
             return result
 
         data, size = _core.read_table(self._ptr, name)

@@ -65,6 +65,13 @@ _lib.zdbc_read_table.argtypes = [
 ]
 _lib.zdbc_read_table.restype = ctypes.c_int
 
+_lib.zdbc_read_columns.argtypes = [
+    ctypes.c_void_p, ctypes.c_char_p,
+    ctypes.POINTER(ctypes.c_char_p), ctypes.c_int,
+    ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_int64),
+]
+_lib.zdbc_read_columns.restype = ctypes.c_int
+
 _lib.zdbc_free_table.argtypes = [
     ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int64,
 ]
@@ -193,6 +200,24 @@ def read_table(db_ptr, name):
     out_size = ctypes.c_int64()
     check(_lib.zdbc_read_table(
         db_ptr, name.encode(),
+        ctypes.byref(out_data), ctypes.byref(out_size),
+    ))
+    return out_data, out_size.value
+
+
+def read_columns(db_ptr, name, col_names):
+    n = len(col_names)
+    names = (ctypes.c_char_p * n)()
+    encoded = []
+    for i, col_name in enumerate(col_names):
+        value = col_name.encode()
+        encoded.append(value)
+        names[i] = value
+
+    out_data = ctypes.c_void_p()
+    out_size = ctypes.c_int64()
+    check(_lib.zdbc_read_columns(
+        db_ptr, name.encode(), names, n,
         ctypes.byref(out_data), ctypes.byref(out_size),
     ))
     return out_data, out_size.value

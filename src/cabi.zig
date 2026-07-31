@@ -187,11 +187,14 @@ fn batchTableHeaderSize(num_cols: usize) usize {
     return @sizeOf(BatchTableHeader) + num_cols * BATCH_COL_META_SIZE;
 }
 
-export fn zdbc_read_table(db: *ZDBC, table_name: [*:0]const u8, out_data: *?*anyopaque, out_size: *i64) i32 {
-    const name_slice = std.mem.span(table_name);
-    const schema = db.schemas.get(name_slice) orelse return -1;
-    const num_cols = schema.columns.len;
-    const header_size = batchTableHeaderSize(num_cols);
+fn readBatch(db: *ZDBC, table_name: []const u8, columns: []const ColumnSchema, num_rows: u64, out_data: *?*anyopaque, out_size: *i64) i32 {
+    if (num_rows > std.math.maxInt(i64) or columns.len > std.math.maxInt(i32)) return -3;
+    const row_count = std.math.cast(usize, num_rows) orelse return -3;
+    const header_size = std.math.add(
+        usize,
+        @sizeOf(BatchTableHeader),
+        std.math.mul(usize, columns.len, BATCH_COL_META_SIZE) catch return -3,
+    ) catch return -3;
 
     // Open the data dir once — not per column
     db.ensureDataDir() catch |err| return mapError(err);
@@ -200,52 +203,64 @@ export fn zdbc_read_table(db: *ZDBC, table_name: [*:0]const u8, out_data: *?*any
 
     // Phase 1: measure total data size
     var data_total: usize = 0;
-    for (schema.columns) |col| {
-        data_total += col.col_type.sizeOf() * @as(usize, @intCast(schema.num_rows));
+    for (columns) |col| {
+        const byte_len = std.math.mul(usize, col.col_type.sizeOf(), row_count) catch return -3;
+        data_total = std.math.add(usize, data_total, byte_len) catch return -3;
     }
 
     // Phase 2: allocate the output buffer up front
-    const total = header_size + data_total;
+    const total = std.math.add(usize, header_size, data_total) catch return -3;
+    if (total > std.math.maxInt(i64)) return -3;
     const buf = db.allocator.alloc(u8, total) catch return -6;
-    errdefer db.allocator.free(buf);
+
+    var arena = newArena();
+    defer arena.deinit();
+    const out_buffers = arena.allocator().alloc([]u8, columns.len) catch {
+        db.allocator.free(buf);
+        return -6;
+    };
 
     // Write header
     {
         const hdr_slice = buf[0..@sizeOf(BatchTableHeader)];
         var hdr: *BatchTableHeader = @ptrCast(@alignCast(hdr_slice.ptr));
-        hdr.num_rows = @intCast(schema.num_rows);
-        hdr.num_columns = @intCast(num_cols);
+        hdr.num_rows = @intCast(num_rows);
+        hdr.num_columns = @intCast(columns.len);
     }
 
-    // Phase 3: read each column directly into the output buffer
+    // Phase 3: describe each column and its final output region
     const meta_off = @sizeOf(BatchTableHeader);
     const meta_slice = buf[meta_off..header_size];
     var metas: [*]BatchColumnMeta = @ptrCast(@alignCast(meta_slice.ptr));
 
     var cur_offs: usize = header_size;
-    for (schema.columns, 0..) |col, i| {
-        const byte_len = col.col_type.sizeOf() * @as(usize, @intCast(schema.num_rows));
+    for (columns, 0..) |col, i| {
+        const byte_len = col.col_type.sizeOf() * row_count;
 
-        // Read column data straight into the output buffer
         const col_data_slice = buf[cur_offs..][0..byte_len];
-        ColumnIO.readColumnFileIntoBuf(
-            db.io, db.allocator, dir, name_slice, col.name, col.col_type,
-            @intCast(schema.num_rows), col_data_slice,
-        ) catch |err| return mapError(err);
+        out_buffers[i] = col_data_slice;
 
         var meta = &metas[i];
         @memset(meta.name[0..], 0);
         const name_len = @min(col.name.len, BATCH_COL_NAME_LEN - 1);
         @memcpy(meta.name[0..name_len], col.name[0..name_len]);
         meta.col_type = @intFromEnum(col.col_type);
-        meta.count = @intCast(schema.num_rows);
+        meta.count = @intCast(num_rows);
         meta.byte_len = @intCast(byte_len);
         meta.data_offset = @intCast(cur_offs);
         cur_offs += byte_len;
     }
 
+    // Phase 4: read directly into final offsets. Benchmarks rejected parallel execution.
+    ColumnIO.readColumnFilesIntoBuf(
+        db.io, db.allocator, dir, table_name, columns, num_rows, out_buffers,
+    ) catch |err| {
+        db.allocator.free(buf);
+        return mapError(err);
+    };
+
     // Trim STR8 columns in-place
-    for (schema.columns, 0..) |col, i| {
+    for (columns, 0..) |col, i| {
         if (col.col_type == .STR8) {
             const meta = &metas[i];
             const off: usize = @intCast(meta.data_offset);
@@ -257,6 +272,32 @@ export fn zdbc_read_table(db: *ZDBC, table_name: [*:0]const u8, out_data: *?*any
     out_data.* = buf.ptr;
     out_size.* = @intCast(total);
     return 0;
+}
+
+export fn zdbc_read_table(db: *ZDBC, table_name: [*:0]const u8, out_data: *?*anyopaque, out_size: *i64) i32 {
+    const name_slice = std.mem.span(table_name);
+    const schema = db.schemas.get(name_slice) orelse return -1;
+    return readBatch(db, name_slice, schema.columns, schema.num_rows, out_data, out_size);
+}
+
+export fn zdbc_read_columns(db: *ZDBC, table_name: [*:0]const u8, col_names: [*]const [*:0]const u8, num_cols: i32, out_data: *?*anyopaque, out_size: *i64) i32 {
+    if (num_cols < 0) return -3;
+
+    const name_slice = std.mem.span(table_name);
+    const schema = db.schemas.get(name_slice) orelse return -1;
+    const n: usize = @intCast(num_cols);
+
+    var arena = newArena();
+    defer arena.deinit();
+    const selected = arena.allocator().alloc(ColumnSchema, n) catch return -6;
+
+    for (0..n) |i| {
+        const col_name = std.mem.span(col_names[i]);
+        const index = schema.columnIndex(col_name) orelse return -2;
+        selected[i] = schema.columns[index];
+    }
+
+    return readBatch(db, name_slice, selected, schema.num_rows, out_data, out_size);
 }
 
 export fn zdbc_free_table(db: *ZDBC, data: ?*anyopaque, size: i64) void {
