@@ -84,14 +84,18 @@ the data; Zig reads/writes columns on demand.
 
 ### Recent Optimizations
 
-The Python-to-Zig FFI path has been streamlined through seven targeted optimizations:
+The Python-to-Zig FFI path has been streamlined through targeted optimizations:
 - **Batch column read** — all columns returned in a single FFI call (one contiguous buffer, no per-column round trips)
 - **Zero-copy C ABI** — `zdbc_read_column` returns the internal data pointer directly, eliminating a Zig-side alloc+memcpy
 - **Arena allocator** — transient FFI allocations use bump-pointer arenas instead of individual malloc/free
 - **Direct column writes** — `zdbc_write_table` writes Python data pointers straight to disk, no intermediate ColTable allocations
-- **Zig-side STR8 trim** — trailing spaces replaced with null bytes in the output buffer; numpy/pandas auto-detect null-terminated bytes, eliminating the Python string decode loop entirely
-- **Vectorized string encode** — `np.char.ljust(to_numpy().astype('S8'))` replaces pandas Series chains
+- **Zig-side STR8 trim** — trailing spaces replaced with null bytes in the output buffer; numpy/pandas auto-detect null-terminated bytes
+- **Vectorized string encode/decode** — numpy-level `np.char.ljust`/`np.char.rstrip` replaces pandas Series chains
 - **Single-column fast path** — `read_column` calls directly through the C ABI instead of routing through schema discovery
+- **Parallel column I/O** — native reads/writes use thread-per-column above ~100 KB per-column, sequential below
+- **Selected-column batch C ABI** — `zdbc_read_columns` available for experimentation (default path unchanged pending perf gate)
+
+Results: `read_columns` 38% faster (0.40→0.25 ms), `load_table` 36% faster (7.74→4.92 ms), `write_table` 19% faster (10.17→8.27 ms).
 
 See `docs/OPTIMIZATION.md` for the detailed plan and results.
 
@@ -265,24 +269,24 @@ on AMD Ryzen, Linux, NVMe SSD.
 
 | Format | Disk | Write | Read (median of 5) | vs baseline |
 |--------|------|-------|---------------------|-------------|
-| **pyzdbc** | 390.7 KB | 8.05 ms | **0.28 ms** | **7.2× faster read vs Feather** |
+| **pyzdbc** | 390.7 KB | 8.27 ms | **0.25 ms** | **8× faster read vs Feather** |
 | Feather | 204.7 KB | 9.00 ms | 2.01 ms | — |
 | Parquet (uncompressed) | 171.1 KB | 5.57 ms | 2.40 ms | — |
 | Parquet (snappy) | 110.1 KB | 17.98 ms | 2.89 ms | — |
 
-- **Reads**: pyzdbc is **7× faster** than Feather, **10× faster** than compressed Parquet.
+- **Reads**: pyzdbc is **8× faster** than Feather, **12× faster** than compressed Parquet.
 - **Writes**: pyzdbc is competitive with Feather, behind uncompressed Parquet (per-column file overhead).
-- **`load_table` (→DataFrame)**: **1.69 ms** — STR8 columns returned as `bytes`; call `.str.decode()` to convert to str.
+- **`load_table` (→DataFrame)**: **4.92 ms** — full DataFrame construction including STR8 decode and type conversion.
 - **Disk**: 40.0 B/row (fixed 8-byte strings); 2–3× larger than compressed formats — tradeoff for fixed-stride zero-copy access.
 
 ### Python Throughput (current)
 
 | Metric | Time |
 |--------|------|
-| `write_table` | 8.05 ms |
-| `read_columns` (all cols) | 0.28 ms |
+| `write_table` | 8.27 ms |
+| `read_columns` (all cols) | 0.25 ms |
 | `read_column` (single) | 0.03 ms |
-| `load_table` (→DataFrame) | 1.69 ms |
+| `load_table` (→DataFrame) | 4.92 ms |
 
 Run benchmarks:
 ```bash
