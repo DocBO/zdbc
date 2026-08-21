@@ -116,6 +116,16 @@ import pyzdbc
 db = pyzdbc.DB("mydb")
 ```
 
+`DB` also accepts an absolute path, so the database can live outside the
+working directory:
+
+```python
+db = pyzdbc.DB("/data/zdbc/mydb")
+```
+
+This stores the registry at `/data/zdbc/mydb` and the column files in
+`/data/zdbc/mydbdir/`. The parent directory must already exist and be writable.
+
 ### Schema & Write
 
 ```python
